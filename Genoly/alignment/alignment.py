@@ -1,8 +1,8 @@
-import torch
-import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
 import time
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
 
 # Motor nativo opcional (parasail, SIMD/C): sustituye el Smith-Waterman
 # escalar de Python, que es O(n^3) e inutilizable (una alineación 100x100
@@ -244,7 +244,6 @@ class GPUSequenceAligner:
         if len(queries) != len(targets):
             raise ValueError("queries y targets deben tener la misma longitud")
         
-        batch_size = len(queries)
         results = []
 
         # El motor nativo (parasail) es O(n^2) SIMD: procesar en serie es
@@ -487,7 +486,7 @@ class GPUSequenceAligner:
         torch.cuda.synchronize() if self.device.type == 'cuda' else None
         start = time.time()
         
-        results = self.align_batch(queries, targets)
+        self.align_batch(queries, targets)
         
         torch.cuda.synchronize() if self.device.type == 'cuda' else None
         gpu_time = time.time() - start

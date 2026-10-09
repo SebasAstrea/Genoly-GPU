@@ -15,13 +15,12 @@ vía recomendada para genomas de decenas de GB.
 """
 
 import hashlib
-import os
 import threading
 from pathlib import Path
 from typing import AsyncIterator, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -29,7 +28,7 @@ from pydantic import BaseModel
 from Genoly.io.fasta import FastaReader
 from Genoly.io.fastq import FastqReader
 from Genoly.quantitative.preprocess import scan_grid_stats
-
+from ui.backend.maintenance import MAX_UPLOAD_BYTES, check_upload_size
 from ui.backend.uploads import (
     UPLOAD_DIR,
     check_registrable,
@@ -44,8 +43,9 @@ router = APIRouter(prefix="/api/upload", tags=["upload"])
 
 CHUNK_BYTES = 1024 * 1024
 
-#: Tamaño máximo recomendado por chunk en la subida por partes. La
-#: escritura es en streaming (nunca se bufferiza el chunk completo en RAM).
+#: Tamaño máximo por chunk en la subida por partes. La escritura es en
+#: streaming (nunca se bufferiza el chunk completo en RAM), pero el límite
+#: evita que un cliente envíe cuerpos gigantes de una sola vez.
 MAX_CHUNK_PUT = 256 * 1024 * 1024
 
 _FASTA_SUFFIXES = (".fasta", ".fa", ".fna", ".txt")
@@ -63,10 +63,14 @@ def _upload_kind(filename: str) -> str:
     return "fasta"
 
 
-def _file_ext(kind: str) -> str:
+def _file_ext(kind: str, filename: str = "") -> str:
+    """Extensión del archivo en disco: preserva .xlsx/.xls de los tabulares."""
     if kind == "fastq":
         return "fastq"
     if kind == "tabular":
+        suffix = Path(filename).suffix.lower()
+        if suffix in (".xlsx", ".xls"):
+            return suffix[1:]
         return "csv"
     return "fasta"
 
@@ -232,7 +236,7 @@ async def upload_fasta(file: UploadFile = File(...)) -> UploadResponse:
 
     kind = _upload_kind(file.filename)
     upload_id = uuid4().hex
-    dest = UPLOAD_DIR / f"{upload_id}.{_file_ext(kind)}"
+    dest = UPLOAD_DIR / f"{upload_id}.{_file_ext(kind, file.filename)}"
     bytes_on_disk = 0
     sha = hashlib.sha256()
 
@@ -243,6 +247,15 @@ async def upload_fasta(file: UploadFile = File(...)) -> UploadResponse:
             async for chunk in _iter_chunks(file):
                 bytes_on_disk += await run_in_threadpool(fh.write, chunk)
                 sha.update(chunk)
+                if MAX_UPLOAD_BYTES and bytes_on_disk > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="El archivo supera el límite de "
+                               f"{MAX_UPLOAD_BYTES // (1024 ** 3)} GiB "
+                               "(GENOLY_MAX_UPLOAD_BYTES)")
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
     except Exception:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=500,
@@ -252,8 +265,8 @@ async def upload_fasta(file: UploadFile = File(...)) -> UploadResponse:
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="El archivo está vacío")
 
-    meta = create_upload(upload_id, kind, dest,
-                         Path(file.filename).name, bytes_on_disk)
+    create_upload(upload_id, kind, dest,
+                  Path(file.filename).name, bytes_on_disk)
     set_checksum(upload_id, sha.hexdigest())
     threading.Thread(target=_background_stats, args=(upload_id, dest),
                      daemon=True).start()
@@ -271,10 +284,14 @@ def chunked_init(req: ChunkedInitRequest) -> ChunkedInitResponse:
     """
     if not req.filename.strip():
         raise HTTPException(status_code=400, detail="Archivo sin nombre")
+    if req.size is not None:
+        if req.size < 0:
+            raise HTTPException(status_code=400, detail="Tamaño inválido")
+        check_upload_size(0, req.size)
 
     kind = _upload_kind(req.filename)
     upload_id = uuid4().hex
-    dest = UPLOAD_DIR / f"{upload_id}.{_file_ext(kind)}"
+    dest = UPLOAD_DIR / f"{upload_id}.{_file_ext(kind, req.filename)}"
     dest.touch()
     create_upload(upload_id, kind, dest,
                   Path(req.filename).name, 0)
@@ -300,15 +317,42 @@ async def chunked_put(upload_id: str, request: Request,
 
     El cliente indica el offset absoluto en el archivo; escribir en la
     misma posición de nuevo reanuda/sobrescribe de forma idempotente.
+    ``offset`` no puede adelantarse al final del archivo (evita huecos
+    dispersos), el chunk no puede superar :data:`MAX_CHUNK_PUT` y el total
+    no puede superar ``GENOLY_MAX_UPLOAD_BYTES``.
     """
     dest = _chunked_dest(upload_id)
+    current = dest.stat().st_size
+    if offset > current:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Offset {offset} por delante del final del archivo "
+                   f"({current} bytes recibidos)")
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit():
+        check_upload_size(offset, int(declared))
+        if int(declared) > MAX_CHUNK_PUT:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Chunk de {int(declared)} bytes: el máximo es "
+                       f"{MAX_CHUNK_PUT // (1024 ** 2)} MiB")
+
     received = offset
     written = 0
     try:
         with dest.open("r+b") as fh:
             fh.seek(offset)
             async for chunk in request.stream():
-                written += await run_in_threadpool(fh.write, chunk)
+                written += len(chunk)
+                if written > MAX_CHUNK_PUT:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Chunk de más de "
+                               f"{MAX_CHUNK_PUT // (1024 ** 2)} MiB")
+                check_upload_size(offset, written)
+                await run_in_threadpool(fh.write, chunk)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=500,
                             detail="No se pudo escribir el chunk")
@@ -330,6 +374,7 @@ def chunked_complete(upload_id: str,
     """
     dest = _chunked_dest(upload_id)
     received = dest.stat().st_size
+    check_upload_size(0, received)
     if req.size is not None and received != req.size:
         raise HTTPException(
             status_code=400,
@@ -368,8 +413,8 @@ def register_fasta(req: RegisterRequest) -> UploadResponse:
     kind = _upload_kind(src.name)
 
     upload_id = uuid4().hex
-    meta = create_upload(upload_id, kind, src, src.name,
-                         bytes_on_disk=int(src.stat().st_size))
+    create_upload(upload_id, kind, src, src.name,
+                  bytes_on_disk=int(src.stat().st_size))
     threading.Thread(target=_background_stats, args=(upload_id, src),
                      daemon=True).start()
     return _response(get_upload(upload_id))

@@ -20,7 +20,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -53,20 +53,47 @@ class Job:
     error: Optional[str] = None
     loop: Optional[asyncio.AbstractEventLoop] = field(
         default=None, repr=False)
-    queue: "asyncio.Queue[Dict[str, Any]]" = field(
-        default_factory=asyncio.Queue, repr=False)
+    #: Colas de eventos, una por suscriptor SSE. Solo se tocan en el hilo
+    #: del event loop (publicación vía ``call_soon_threadsafe``), de modo
+    #: que varios clientes pueden seguir el mismo trabajo sin quedarse cada
+    #: uno con una parte de los eventos.
+    subscribers: list = field(default_factory=list, repr=False)
+    #: Último evento terminal (done/error) para poder reenviarlo a un
+    #: cliente que se suscribe cuando el trabajo ya terminó.
+    terminal: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+    def _deliver(self, event: Dict[str, Any]) -> None:
+        """Entrega el evento a todos los suscriptores (hilo del loop)."""
+        if event.get("type") in ("done", "error"):
+            self.terminal = event
+        for queue in list(self.subscribers):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:  # pragma no cubierto - colas ilimitadas
+                pass
 
     def publish(self, event: Dict[str, Any]) -> None:
         """
-        Publica un evento en la cola desde cualquier hilo (thread-safe).
+        Publica un evento en todas las colas de suscriptores (thread-safe).
 
-        La cola es ilimitada: ``put_nowait`` nunca bloquea el event loop.
         Los productores deben limitar la frecuencia (throttle) para no
-        inundarla con archivos enormes.
+        inundar las colas con archivos enormes.
         """
         loop = self.loop
         if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(self.queue.put_nowait, dict(event))
+            loop.call_soon_threadsafe(self._deliver, dict(event))
+
+    def subscribe(self, queue: "asyncio.Queue[Dict[str, Any]]") -> None:
+        """Registra un nuevo suscriptor SSE (solo en el hilo del loop)."""
+        if queue not in self.subscribers:
+            self.subscribers.append(queue)
+
+    def unsubscribe(self, queue: "asyncio.Queue[Dict[str, Any]]") -> None:
+        """Retira un suscriptor SSE; nunca falla si ya no estaba."""
+        try:
+            self.subscribers.remove(queue)
+        except ValueError:
+            pass
 
     def snapshot(self) -> Dict[str, Any]:
         """Estado serializable del trabajo (para GET /api/jobs/{id})."""
@@ -110,28 +137,6 @@ class JobManager:
         with self._lock:
             self._evict_locked()
             self._jobs[job.id] = job
-        return job
-
-    def submit(self, job: Job, work: Callable[[], Dict[str, Any]]) -> Job:
-        """
-        Ejecuta ``work`` en un hilo de fondo. El valor devuelto por
-        ``work`` se publica como evento ``done`` y queda disponible en
-        ``job.result`` / GET /api/jobs/{id}.
-        """
-
-        def runner() -> None:
-            job.status = "running"
-            job.publish({"type": "start", "kind": job.kind})
-            try:
-                job.result = work()
-                job.status = "done"
-                job.publish({"type": "done", "result": job.result})
-            except Exception as exc:  # el mensaje viaja al cliente vía SSE
-                job.status = "error"
-                job.error = str(exc) or exc.__class__.__name__
-                job.publish({"type": "error", "detail": job.error})
-
-        self._executor.submit(runner)
         return job
 
     def submit_process(self, job: Job, spec: Dict[str, Any],

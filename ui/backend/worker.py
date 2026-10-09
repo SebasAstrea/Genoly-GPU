@@ -21,7 +21,10 @@ pesadas se cargan dentro de la ejecución del trabajo, para que el
 proceso hijo arranque ligero.
 """
 
+import logging
 import multiprocessing as mp
+
+logger = logging.getLogger("genoly.worker")
 
 
 def _progress(conn: "mp.connection.Connection"):
@@ -93,8 +96,8 @@ def _run_kmer(spec: dict, progress) -> dict:
 
 def _run_fastq_qc(spec: dict, progress) -> dict:
     """Control de calidad FastQC-like de un FASTQ en streaming (CPU/numpy)."""
-    from Genoly.qc.quality import QualityAnalyzer
     from Genoly.io.fastq import FastqReader
+    from Genoly.qc.quality import QualityAnalyzer
     qa = QualityAnalyzer("cpu")
     return qa.analyze_stream(
         FastqReader(spec["path"]).records(),
@@ -106,10 +109,11 @@ def _run_fastq_qc(spec: dict, progress) -> dict:
 def _run_fastq_process(spec: dict, progress) -> dict:
     """Trim por calidad + filtro de un FASTQ en streaming; actualiza el
     registro de la subida de salida."""
-    from Genoly.qc.quality import QualityAnalyzer
-    from Genoly.io.fastq import FastqReader
-    from ui.backend.uploads import set_bytes, set_stats
     import os
+
+    from Genoly.io.fastq import FastqReader
+    from Genoly.qc.quality import QualityAnalyzer
+    from ui.backend.uploads import set_bytes, set_stats
 
     qa = QualityAnalyzer("cpu")
     out_path = spec["out_path"]
@@ -128,8 +132,10 @@ def _run_fastq_process(spec: dict, progress) -> dict:
         try:
             set_bytes(out_upload_id, int(os.path.getsize(out_path)))
             set_stats(out_upload_id, reads_out, bases_out, None)
-        except Exception:
-            pass  # el registro lo puede rellenar el frontend vía GET
+        except Exception as exc:
+            # el registro lo puede rellenar el frontend vía GET
+            logger.warning("No se pudieron guardar las métricas de %s: %s",
+                           out_upload_id, exc)
 
     return {
         "reads_in": reads_in,
@@ -144,11 +150,12 @@ def _run_fastq_process(spec: dict, progress) -> dict:
 def _run_map(spec: dict, progress) -> dict:
     """Mapea lecturas FASTQ contra una referencia FASTA (seed-and-extend)
     y, si ``sam_path`` está definido, escribe el SAM en streaming."""
+    import os
+
     from Genoly.alignment.mapper import ReadMapper
     from Genoly.io.fastq import FastqReader
     from Genoly.io.sam import write_sam
     from ui.backend.uploads import set_bytes, set_stats
-    import os
 
     mapper = ReadMapper(k=spec["k"], stride=spec["stride"],
                         min_seeds=spec.get("min_seeds", 2))
@@ -186,8 +193,8 @@ def _run_map(spec: dict, progress) -> dict:
         try:
             set_bytes(sam_upload_id, int(os.path.getsize(sam_path)))
             set_stats(sam_upload_id, len(mapped), 0, None)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("No se pudieron guardar las métricas: %s", exc)
 
     def to_dict(h):
         return {
@@ -216,10 +223,11 @@ def _run_map(spec: dict, progress) -> dict:
 def _run_variant_call(spec: dict, progress) -> dict:
     """Llamada de variantes de un SAM/BAM contra una referencia (por
     regiones, vectorizada) + exportación VCF."""
+    import os
+
     from Genoly.variants.caller import VariantCaller
     from Genoly.variants.vcf import write_vcf
     from ui.backend.uploads import set_bytes, set_stats
-    import os
 
     vc = VariantCaller()
     result = vc.call_variants_from_sam(
@@ -236,8 +244,8 @@ def _run_variant_call(spec: dict, progress) -> dict:
         try:
             set_bytes(out_id, int(os.path.getsize(out_vcf)))
             set_stats(out_id, result["total_variants"], 0, None)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("No se pudieron guardar las métricas: %s", exc)
 
     sample = []
     for name, variants in result["by_sequence"].items():
@@ -288,9 +296,10 @@ def _run_annotation(spec: dict, progress) -> dict:
 
 def _run_report(spec: dict, progress) -> dict:
     """Genera heatmap y/o volcano SVG + reporte Markdown/JSON."""
+    import os
+
     from Genoly.report.plots import build_report, heatmap_svg, volcano_svg
     from ui.backend.uploads import set_bytes, set_stats
-    import os
 
     out: dict = {}
     if spec.get("matrix"):
@@ -321,18 +330,20 @@ def _run_report(spec: dict, progress) -> dict:
             try:
                 set_bytes(md_id, int(os.path.getsize(spec["md_path"])))
                 set_stats(md_id, 1, 0, None)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("No se pudieron guardar las métricas: %s",
+                               exc)
             out["md_upload_id"] = md_id
     return out
 
 
 def _run_qdata_clean(spec: dict, progress) -> dict:
     """Limpia/imputa/filtra una matriz CSV/Excel sucia y guarda el JSON."""
-    from Genoly.quantitative.preprocess import clean_grid, load_grid
-    from ui.backend.uploads import set_bytes, set_stats
     import json
     import os
+
+    from Genoly.quantitative.preprocess import clean_grid, load_grid
+    from ui.backend.uploads import set_bytes, set_stats
 
     progress({"stage": "load"})
     grid = load_grid(spec["path"])
@@ -366,8 +377,57 @@ def _run_qdata_clean(spec: dict, progress) -> dict:
             set_bytes(out_id, int(os.path.getsize(spec["out_path"])))
             set_stats(out_id, len(phenotypes),
                       len(phenotypes) * len(markers), None)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("No se pudieron guardar las métricas: %s", exc)
+
+    return {"report": report, "clean_id": out_id,
+            "n_individuals": len(phenotypes), "n_markers": len(markers)}
+
+
+def _run_apply_filters(spec: dict, progress) -> dict:
+    """Limpia/imputa/filtra una grid ya filtrada por el cliente (frontend)."""
+    import json
+    import os
+
+    from Genoly.quantitative.preprocess import clean_grid
+    from ui.backend.uploads import set_bytes, set_stats
+
+    progress({"stage": "load"})
+    # spec["grid_rows"] viene del frontend: lista de listas tras filtrado interactivo
+    grid = [list(row) for row in spec.get("grid_rows", [])]
+    if not grid:
+        raise ValueError("La grid está vacía — ninguna fila sobrevivió al filtro")
+
+    phenotypes, genotypes, markers, report = clean_grid(
+        grid,
+        phenotype_col=spec["phenotype_col"],
+        impute_method=spec.get("impute_method", "media"),
+        max_column_missingness=spec.get("max_column_missingness", 1.0),
+        min_individuals=spec.get("min_individuals", 5),
+        min_markers=spec.get("min_markers", 2),
+        min_maf=spec.get("min_maf", 0.0),
+        hwe_p=spec.get("hwe_p"),
+    )
+    progress({"stage": "clean", "rows": len(phenotypes),
+              "markers": len(markers)})
+
+    payload = {
+        "phenotypes": phenotypes,
+        "genotypes": genotypes,
+        "markers": markers,
+        "report": report,
+    }
+    with open(spec["out_path"], "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+    out_id = spec.get("out_upload_id")
+    if out_id:
+        try:
+            set_bytes(out_id, int(os.path.getsize(spec["out_path"])))
+            set_stats(out_id, len(phenotypes),
+                      len(phenotypes) * len(markers), None)
+        except Exception as exc:
+            logger.warning("No se pudieron guardar las métricas: %s", exc)
 
     return {"report": report, "clean_id": out_id,
             "n_individuals": len(phenotypes), "n_markers": len(markers)}
@@ -442,6 +502,8 @@ def run_job(spec: dict, conn: "mp.connection.Connection") -> None:
             result = _run_report(spec, _progress(conn))
         elif kind == "qdata_clean":
             result = _run_qdata_clean(spec, _progress(conn))
+        elif kind == "apply_filters":
+            result = _run_apply_filters(spec, _progress(conn))
         elif kind == "crossval":
             result = _run_crossval(spec, _progress(conn))
         elif kind == "gwas":

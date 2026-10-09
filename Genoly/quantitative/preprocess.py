@@ -60,6 +60,27 @@ def _is_non_numeric(cell: Optional[str]) -> bool:
     return v is not None and v != v
 
 
+def _effective_suffix(path: Path) -> str:
+    """
+    Extensión real del archivo para elegir el lector.
+
+    Además de la extensión declarada, detecta XLSX por magic bytes
+    (``PK\\x03\\x04``, cabecera ZIP/OPC): así un .xlsx guardado con la
+    extensión equivocada (p. ej. ``.csv`` por la subida de la UI) no se
+    descuadra al leerlo como texto.
+    """
+    suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xls"):
+        return suffix
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) == b"PK\x03\x04":
+                return ".xlsx"
+    except OSError:
+        pass
+    return suffix
+
+
 def load_grid(path, max_rows: Optional[int] = None) -> List[List[Optional[str]]]:
     """
     Lee un archivo CSV/TSV/TXT o Excel y devuelve una matriz de celdas.
@@ -82,7 +103,7 @@ def load_grid(path, max_rows: Optional[int] = None) -> List[List[Optional[str]]]
         ImportError: Si se lee Excel sin openpyxl instalado.
     """
     p = Path(path)
-    suffix = p.suffix.lower()
+    suffix = _effective_suffix(p)
 
     if suffix in (".xlsx", ".xls"):
         try:
@@ -91,15 +112,19 @@ def load_grid(path, max_rows: Optional[int] = None) -> List[List[Optional[str]]]
             raise ImportError(
                 "Instala openpyxl para leer archivos de Excel: pip install openpyxl"
             ) from exc
-        workbook = openpyxl.load_workbook(p, read_only=True, data_only=True)
-        sheet = workbook.active
-        grid = []
-        for row in sheet.iter_rows(values_only=True):
-            grid.append([("" if cell is None else str(cell).strip())
-                         for cell in row])
-            if max_rows and len(grid) >= max_rows:
-                break
-        workbook.close()
+        # File handle en vez de ruta: openpyxl valida la extensión del
+        # nombre solo con rutas; con stream comprueba realmente el ZIP,
+        # así un XLSX guardado como .csv se lee igual.
+        with open(p, "rb") as fh:
+            workbook = openpyxl.load_workbook(fh, read_only=True, data_only=True)
+            sheet = workbook.active
+            grid = []
+            for row in sheet.iter_rows(values_only=True):
+                grid.append([("" if cell is None else str(cell).strip())
+                             for cell in row])
+                if max_rows and len(grid) >= max_rows:
+                    break
+            workbook.close()
     elif suffix in (".csv", ".tsv", ".txt"):
         lines = []
         with open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
@@ -132,20 +157,21 @@ def scan_grid_stats(path) -> dict:
     Pensado para las estadísticas de subida: no materializa la matriz.
     """
     p = Path(path)
-    suffix = p.suffix.lower()
+    suffix = _effective_suffix(p)
     if suffix in (".xlsx", ".xls"):
         try:
             import openpyxl
         except ImportError:
             return {"rows": 0, "columns": 0, "header_detected": False}
-        workbook = openpyxl.load_workbook(p, read_only=True)
-        sheet = workbook.active
-        rows = 0
-        cols = 0
-        for row in sheet.iter_rows(values_only=True):
-            rows += 1
-            cols = max(cols, len(row))
-        workbook.close()
+        with open(p, "rb") as fh:
+            workbook = openpyxl.load_workbook(fh, read_only=True)
+            sheet = workbook.active
+            rows = 0
+            cols = 0
+            for row in sheet.iter_rows(values_only=True):
+                rows += 1
+                cols = max(cols, len(row))
+            workbook.close()
         return {"rows": max(0, rows - 1), "columns": cols,
                 "header_detected": True}
 

@@ -1,18 +1,16 @@
 from pathlib import Path
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
-from Genoly.qc.quality import QualityAnalyzer
-from Genoly.io.fastq import FastqRecord
 from Genoly.io.fasta import FastaReader
-
+from Genoly.io.fastq import FastqRecord
+from Genoly.qc.quality import QualityAnalyzer
 from ui.backend import jobs
 from ui.backend.datasets import get_dataset
 from ui.backend.uploads import UPLOAD_DIR, create_upload, upload_path
-
 
 router = APIRouter(prefix="/api/qc", tags=["qc"])
 

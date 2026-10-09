@@ -11,26 +11,29 @@ Ejecutar desde la raiz del proyecto:
 import asyncio
 import os
 import random
-import sys
+import shutil
 import tempfile
+import time
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from ui.backend import jobs
 from Genoly.alignment.mapper import ReadMapper, reverse_complement
 from Genoly.io.fasta import FastaRecord, write_fasta
 from Genoly.io.fastq import FastqRecord, write_fastq
-from Genoly.io.sam import write_sam, iter_sam
+from Genoly.io.sam import iter_sam, write_sam
 from Genoly.variants.caller import VariantCaller
 from Genoly.variants.vcf import write_vcf
+from ui.backend import jobs
 
 
 def _run_job(spec):
     async def main():
         job = jobs.manager.create(spec.get("kind", "kmer"))
         jobs.manager.submit_process(job, spec)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -71,6 +74,7 @@ def _make_dataset(tmpdir, n_ref=50_000, n_var=40, cov=40, rate=0.45,
 class TestVariantPipeline(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='var_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.ref, self.ref_path, self.reads_path, self.variants, self.reads = \
             _make_dataset(self.tmpdir)
         self.mapper = ReadMapper(k=15, stride=1, min_seeds=3)
@@ -117,6 +121,7 @@ class TestVariantPipeline(unittest.TestCase):
 class TestVariantJobAislado(unittest.TestCase):
     def test_variant_call_en_proceso(self):
         tmpdir = tempfile.mkdtemp(prefix='varjob_')
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         ref, ref_path, reads_path, variants, reads = _make_dataset(
             tmpdir, n_ref=30_000, n_var=20, region=(5_000, 8_000))
         mapper = ReadMapper(k=15, stride=1, min_seeds=3)

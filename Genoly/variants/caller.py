@@ -1,10 +1,20 @@
+from bisect import bisect_left
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn.functional as F
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 from Genoly.core.device import DeviceManager
 from Genoly.encoding.encoder import SequenceEncoder
+
+#: Offset Phred+33 (Sanger / Illumina 1.8+): ASCII de la calidad menos 33.
+PHRED_OFFSET = 33
+
+#: Calidad asignada a las lecturas sin calidades (``None`` o ``*`` en SAM):
+#: el más alto posible para que ninguna base se descarte por calidad, ya que
+#: "calidad no disponible" no es lo mismo que "calidad mala".
+PHRED_MISSING = 93
 
 
 @dataclass
@@ -26,6 +36,10 @@ class Variant:
     alt_count: int
     freq: float
     bases: Dict[str, int] = field(default_factory=dict)
+    #: Base de la referencia inmediatamente anterior a la deleción; permite
+    #: escribir la representación anclada que exige el VCF 4.2. ``None``
+    #: cuando la deleción empieza en la primera base de la secuencia.
+    anchor: Optional[str] = None
 
 
 @dataclass
@@ -65,6 +79,25 @@ class VariantCaller:
         complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A',
                       'N': 'N', 'U': 'A'}
         return ''.join(complement.get(b, 'N') for b in reversed(sequence.upper()))
+
+    def _quality_scores(self, qualities: List[Optional[str]], batch: int,
+                        max_len: int) -> torch.Tensor:
+        """Matriz ``(batch, max_len)`` de calidades Phred en el dispositivo.
+
+        Las lecturas sin calidades (``None`` o cadena vacía) se rellenan con
+        :data:`PHRED_MISSING` para que el filtro por calidad las conserve en
+        lugar de descartarlas.
+        """
+        qual = torch.full((batch, max_len), PHRED_MISSING, dtype=torch.long,
+                          device=self.device)
+        for i, q in enumerate(qualities[:batch]):
+            if not q:
+                continue
+            row = torch.tensor([ord(c) - PHRED_OFFSET for c in q],
+                               dtype=torch.long, device=self.device)
+            n = min(row.numel(), max_len)
+            qual[i, :n] = row[:n]
+        return qual
 
     # ------------------------------------------------------------------ #
     # Pileup en GPU
@@ -113,12 +146,7 @@ class VariantCaller:
 
         # Filtro por calidad de base
         if self.min_base_quality is not None and qualities is not None:
-            qual = torch.zeros((b, max_len), dtype=torch.long, device=self.device)
-            for i, q in enumerate(qualities):
-                if q:
-                    row = torch.tensor([ord(c) - 33 for c in q],
-                                       dtype=torch.long, device=self.device)
-                    qual[i, :len(row)] = row
+            qual = self._quality_scores(qualities, b, max_len)
             valid &= qual >= self.min_base_quality
 
         # Acumular conteos de bases (A=0, C=1, G=2, T=3) con scatter
@@ -219,42 +247,14 @@ class VariantCaller:
         Es una heurística conservadora: solo se reporta una deleción cuando
         existe un tramo interior con cobertura nula de al menos `min_del_len`
         bases, con posiciones a ambos lados cubiertas.
+
+        Implementado con la versión vectorizada (:meth:`_call_deletions_vec`),
+        sin ``max_del_len`` para conservar el comportamiento histórico.
         """
-        deletions = []
-        ref_len = len(reference)
-        depth_cpu = depth.cpu()
-
-        covered = depth_cpu >= min_flank_depth
-        in_deletion = False
-        start = None
-
-        for i in range(ref_len):
-            if not covered[i] and depth_cpu[i].item() == 0:
-                if not in_deletion:
-                    in_deletion = True
-                    start = i
-            else:
-                if in_deletion:
-                    end = i - 1
-                    run_len = end - start + 1
-                    if run_len >= min_del_len:
-                        # Comprobar cobertura de los flancos
-                        left_ok = start == 0 or depth_cpu[start - 1].item() >= min_flank_depth
-                        right_ok = end == ref_len - 1 or depth_cpu[end + 1].item() >= min_flank_depth
-                        if left_ok and right_ok:
-                            deletions.append(Variant(
-                                position=start + 1,
-                                ref=reference[start:end + 1],
-                                alt='-',
-                                type='DEL',
-                                depth=0,
-                                alt_count=0,
-                                freq=1.0,
-                            ))
-                    in_deletion = False
-                    start = None
-
-        return deletions
+        return self._call_deletions_vec(
+            reference, depth, min_del_len=min_del_len,
+            max_del_len=max(len(reference), 1),
+            min_flank_depth=min_flank_depth)
 
     # ------------------------------------------------------------------ #
     # Llamada de variantes desde SAM/BAM (vectorizada, por regiones)
@@ -288,13 +288,7 @@ class VariantCaller:
             < lengths.unsqueeze(1)
 
         if self.min_base_quality is not None and qualities is not None:
-            qual = torch.zeros((b, max_len), dtype=torch.long,
-                               device=self.device)
-            for i, q in enumerate(qualities):
-                if q:
-                    row = torch.tensor([ord(c) - 33 for c in q],
-                                       dtype=torch.long, device=self.device)
-                    qual[i, :len(row)] = row
+            qual = self._quality_scores(qualities, b, max_len)
             valid &= qual >= self.min_base_quality
 
         counts = torch.zeros((ref_len, 4), dtype=torch.float32,
@@ -321,6 +315,8 @@ class VariantCaller:
         en los flancos es improbable en un experimento con buena
         cobertura)."""
         zero = depth == 0
+        if zero.numel() > len(reference):
+            zero = zero[:len(reference)]
         n = zero.numel()
         if not zero.any():
             return []
@@ -339,15 +335,24 @@ class VariantCaller:
             if left_ok and right_ok:
                 variants.append(Variant(position=s + 1, ref=reference[s:e + 1],
                                         alt='-', type='DEL', depth=0,
-                                        alt_count=0, freq=1.0))
+                                        alt_count=0, freq=1.0,
+                                        anchor=reference[s - 1] if s > 0
+                                        else None))
         return variants
 
     def _call_region(self, reference: str, reads: List[Read],
                      min_depth: int = 10, min_alt_freq: float = 0.2,
                      min_flank_depth: int = 2,
-                     max_del_len: int = 1000) -> List[Variant]:
-        """Llama variantes de una región con detección vectorizada."""
-        counts, depth = self._pileup_counts(reference, reads)
+                     max_del_len: int = 1000,
+                     qualities: Optional[List[str]] = None) -> List[Variant]:
+        """Llama variantes de una región con detección vectorizada.
+
+        ``qualities`` es opcional: una cadena Phred por lectura, en el mismo
+        orden que ``reads``. Si el caller tiene ``min_base_quality`` definido,
+        las bases por debajo de ese umbral se excluyen del pileup (si no se
+        pasan calidades el filtro no puede aplicarse).
+        """
+        counts, depth = self._pileup_counts(reference, reads, qualities)
         length = len(reference)
         if length == 0:
             return []
@@ -429,8 +434,10 @@ class VariantCaller:
         for sr in iter_sam(sam_path):
             if not sr.mapped or sr.rname is None:
                 continue
+            # ``*`` significa "calidad no disponible" en SAM: no filtrar.
+            qual = sr.qual if sr.qual and sr.qual != '*' else None
             reads_by_ref.setdefault(sr.rname, []).append(
-                (sr.seq, sr.pos, sr.strand, sr.qual))
+                (sr.seq, sr.pos, sr.strand, qual))
 
         by_sequence: Dict[str, List[Variant]] = {}
         sequences_summary: List[dict] = []
@@ -450,18 +457,32 @@ class VariantCaller:
             step = region_size or length
             seq_variants: List[Variant] = []
             n_reads = 0
+
+            # Ordenar por posición permite descartar con búsqueda binaria las
+            # lecturas que no pueden solapar la región (antes se recorría la
+            # lista completa por cada región -> O(lecturas x regiones)).
+            recs.sort(key=lambda t: t[1])
+            positions = [t[1] for t in recs]
+            max_read_len = max((len(t[0]) for t in recs), default=0)
+
             for ri, r0 in enumerate(range(0, length, step)):
                 r1 = min(r0 + step, length)
+                lo = bisect_left(positions, r0 - max_read_len)
+                hi = bisect_left(positions, r1)
                 region_reads: List[Read] = []
-                for (seq, pos, strand, qual) in recs:
-                    if pos < r1 and pos + len(seq) > r0:
+                region_quals: List[Optional[str]] = []
+                for (seq, pos, strand, qual) in recs[lo:hi]:
+                    if pos + len(seq) > r0:
                         region_reads.append(Read(sequence=seq,
-                                                 start=pos - r0, strand=strand))
+                                                 start=pos - r0,
+                                                 strand=strand))
+                        region_quals.append(qual)
                 if not region_reads:
                     continue
                 n_reads += len(region_reads)
                 local = self._call_region(refseq[r0:r1], region_reads,
-                                          min_depth, min_alt_freq)
+                                          min_depth, min_alt_freq,
+                                          qualities=region_quals)
                 for v in local:
                     v.position += r0
                 seq_variants.extend(local)

@@ -1,3 +1,3 @@
-from Genoly.variants.caller import VariantCaller, Variant, Read, PileupResult
+from Genoly.variants.caller import PileupResult, Read, Variant, VariantCaller
 
 __all__ = ['VariantCaller', 'Variant', 'Read', 'PileupResult']

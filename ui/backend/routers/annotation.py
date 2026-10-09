@@ -5,9 +5,10 @@ Anotación funcional: mapeo de variantes a genes/regiones y términos GO.
   (proceso aislado; progreso y resultado por SSE).
 """
 
+from typing import List, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from ui.backend import jobs
 from ui.backend.uploads import upload_path

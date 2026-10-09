@@ -20,10 +20,8 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+from Genoly import FastaRecord, write_fasta
 from ui.backend import jobs
-from Genoly import write_fasta, FastaRecord
 
 
 def _run_job(spec, totals=None):
@@ -31,7 +29,11 @@ def _run_job(spec, totals=None):
     async def main():
         job = jobs.manager.create(spec.get("kind", "kmer"))
         jobs.manager.submit_process(job, spec, totals=totals)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -41,6 +43,7 @@ class TestProcessIsolation(unittest.TestCase):
     def test_job_kmer_proceso_completa(self):
         """Un job real de k-mers se ejecuta en un proceso hijo y da resultado."""
         d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         p = os.path.join(d, 'a.fasta')
         write_fasta(p, [FastaRecord(id='s', sequence='ACGT' * 10)])
         job = _run_job({"kind": "kmer", "path": p, "k": 5, "canonical": True,
@@ -73,6 +76,7 @@ class TestProcessIsolation(unittest.TestCase):
         """La limpieza borra los derrames de PIDs muertos y conserva los vivos."""
         from Genoly.kmer.kmers import cleanup_orphan_spills
         base = tempfile.mkdtemp(prefix='spill_clean_')
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         p = subprocess.Popen([sys.executable, '-c', 'pass'])
         dead_pid = p.pid
         p.wait()  # pid garantizado muerto
@@ -98,6 +102,7 @@ class TestProcessIsolation(unittest.TestCase):
     def test_progreso_fusionado_con_totales(self):
         """Los eventos de progreso llevan los totales fusionados."""
         d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         p = os.path.join(d, 'b.fasta')
         write_fasta(p, [FastaRecord(id='s', sequence='ACGT' * 100)])
         events = []
@@ -109,7 +114,11 @@ class TestProcessIsolation(unittest.TestCase):
                 job, {"kind": "kmer", "path": p, "k": 5, "canonical": True,
                       "min_abundance": 1, "top": 3, "sequences": []},
                 totals={"total_records": 1, "total_bases": 400})
+            deadline = time.monotonic() + 120
             while job.status not in ("done", "error"):
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"El job {job.id} no terminó en 120 s")
                 await asyncio.sleep(0.05)
             return job
         job = asyncio.run(main())

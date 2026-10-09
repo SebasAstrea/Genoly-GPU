@@ -9,22 +9,25 @@ Ejecutar desde la raiz del proyecto:
 import asyncio
 import os
 import random
-import sys
+import shutil
 import tempfile
+import time
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from ui.backend import jobs
 from Genoly.io.fastq import FastqReader, FastqRecord, write_fastq
 from Genoly.qc.quality import QualityAnalyzer
+from ui.backend import jobs
 
 
 def _run_job(spec):
     async def main():
         job = jobs.manager.create(spec.get("kind", "kmer"))
         jobs.manager.submit_process(job, spec)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -42,6 +45,7 @@ def _rnd_read(rng, n, q_base=35, n_prob=0.01):
 class TestFastqReader(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='fastq_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
 
     def test_lector_por_bloques_y_scan_stats(self):
         rng = random.Random(1)
@@ -103,7 +107,9 @@ class TestFastqQcStream(unittest.TestCase):
         self.assertEqual(events[-1]['reads'], 500)
 
     def test_process_stream_trim_y_filtro(self):
-        out = os.path.join(tempfile.mkdtemp(), 'clean.fastq')
+        _td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, _td, ignore_errors=True)
+        out = os.path.join(_td, 'clean.fastq')
         rin, rout, bin_, bout = self.qa.process_stream(
             iter(self.records), open(out, 'w'),
             min_quality=20, window_size=5, min_length=30,
@@ -115,7 +121,9 @@ class TestFastqQcStream(unittest.TestCase):
     def test_lecturas_de_baja_calidad_se_descartan(self):
         bad = [FastqRecord(id=f'b{i}', sequence='A' * 100,
                            quality='#' * 100) for i in range(50)]
-        out = os.path.join(tempfile.mkdtemp(), 'bad.fastq')
+        _td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, _td, ignore_errors=True)
+        out = os.path.join(_td, 'bad.fastq')
         rin, rout, _, _ = self.qa.process_stream(
             iter(bad), open(out, 'w'), min_quality=20, window_size=5,
             min_length=0, min_mean_quality=0, max_n_ratio=1)
@@ -128,6 +136,7 @@ class TestFastqJobAislado(unittest.TestCase):
     def setUp(self):
         rng = random.Random(9)
         self.tmpdir = tempfile.mkdtemp(prefix='fastqjob_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         records = [_rnd_read(rng, rng.randint(50, 120)) for _ in range(800)]
         self.path = os.path.join(self.tmpdir, 'reads.fastq')
         write_fastq(self.path, records)

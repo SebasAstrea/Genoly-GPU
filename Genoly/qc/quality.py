@@ -1,7 +1,8 @@
-import numpy as np
-import torch
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
+
+import numpy as np
+import torch
 
 from Genoly.core.device import DeviceManager
 from Genoly.encoding.encoder import SequenceEncoder
@@ -76,15 +77,23 @@ class QualityAnalyzer:
         """
         Composición total de bases del conjunto de secuencias.
 
+        Cuenta A, C, G y T por su índice; todo lo demás (N y los códigos
+        IUPAC de ambigüedad R, Y, S, W, K, M, B, D, H, V) se acumula en
+        ``N``. El relleno de las secuencias cortas no se cuenta.
+
         Args:
             sequences: Lista de secuencias.
 
         Returns:
             Diccionario base -> número de ocurrencias.
         """
-        encoded, _ = self.encoder.encode(sequences)
-        valid = encoded < self.idx_N
-        flat = encoded[valid].cpu()
+        encoded, lengths = self.encoder.encode(sequences)
+        # Fuera del relleno y de las bases canónicas -> clase N
+        canonical = torch.where(encoded < self.idx_N, encoded,
+                                torch.full_like(encoded, self.idx_N))
+        positions = torch.arange(encoded.shape[1], device=self.device)
+        real = positions.unsqueeze(0) < lengths.unsqueeze(1)
+        flat = canonical[real].cpu()
         counts = torch.bincount(flat, minlength=5).tolist()
         bases = ['A', 'C', 'G', 'T', 'N']
         return {base: int(counts[i]) for i, base in enumerate(bases)}
@@ -232,8 +241,12 @@ class QualityAnalyzer:
         sequences = [r.sequence for r in records]
         total_bases = sum(len(s) for s in sequences)
 
-        gc = self.gc_content_percent(sequences).mean().item()
         composition = self.base_composition(sequences)
+        # GC ponderado por bases: media de fracciones por lectura sesga el
+        # resultado cuando las lecturas tienen longitudes distintas.
+        acgt = sum(composition[b] for b in "ACGT")
+        gc = ((composition["C"] + composition["G"]) / acgt * 100.0
+              if acgt else 0.0)
 
         all_scores = []
         for r in records:
@@ -366,7 +379,8 @@ class QualityAnalyzer:
         """
         num_reads = 0
         total_bases = 0
-        gc_bases = 0.0
+        gc_bases = 0
+        acgt_bases = 0
         composition = {base: 0 for base in "ACGTN"}
         qsum = np.zeros(max_position, dtype=np.float64)
         qcount = np.zeros(max_position, dtype=np.float64)
@@ -382,8 +396,8 @@ class QualityAnalyzer:
         batch: List[FastqRecord] = []
 
         def flush() -> None:
-            nonlocal num_reads, total_bases, gc_bases, q_total, q_n
-            nonlocal lengths_sum, min_len, max_len
+            nonlocal num_reads, total_bases, gc_bases, acgt_bases
+            nonlocal q_total, q_n, lengths_sum, min_len, max_len
             seqs = [r.sequence for r in batch]
             quals = [r.quality for r in batch]
             b_bases = sum(len(s) for s in seqs)
@@ -391,11 +405,14 @@ class QualityAnalyzer:
             total_bases += b_bases
             lengths_sum += b_bases
 
-            gc_frac = self.gc_content_percent(seqs).mean().item()
-            gc_bases += gc_frac / 100.0 * b_bases
             comp = self.base_composition(seqs)
             for base in composition:
                 composition[base] += comp[base]
+            # GC ponderado por bases canónicas: la media de fracciones por
+            # lectura (y usar bases totales, con N) sesga el resultado
+            # cuando las lecturas tienen longitudes variables.
+            acgt_bases += sum(comp[b] for b in "ACGT")
+            gc_bases += comp["C"] + comp["G"]
 
             for q in quals:
                 a = self._scores_array(q)
@@ -446,7 +463,7 @@ class QualityAnalyzer:
             "max_length": max_len,
             "mean_quality": round(q_total / q_n, 2) if q_n else 0.0,
             "gc_content_percent": round(
-                gc_bases / total_bases * 100.0, 4) if total_bases else 0.0,
+                gc_bases / acgt_bases * 100.0, 4) if acgt_bases else 0.0,
             "base_composition": composition,
             "quality_by_position": quality_by_position,
             "length_histogram": [int(v) for v in hist],

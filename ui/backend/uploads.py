@@ -17,23 +17,31 @@ consulta en ``GET /api/upload/{id}``.
 
 Toda la información de cada subida vive en un registro JSON
 (``registry.json``) bajo ``UPLOAD_DIR``, persistente entre reinicios y
-protegido con un candado de hilos (escritura atómica: temporal + rename).
+protegido con un candado ENTRE PROCESOS (flock): el proceso trabajador que
+calcula las estadísticas escribe el mismo fichero que el servidor, así que
+un candado de hilos no bastaba. Ver :mod:`ui.backend.registry`.
 
 Directorio de uploads: ``GENOLY_UPLOAD_DIR`` (por defecto, el temporal
 del sistema; para archivos de decenas de GB apúntalo a un disco real,
 p. ej. ``/var/tmp/genoly/uploads``). El derrame del conteo de k-mers se
 configura por separado con ``GENOLY_SPILL_DIR`` (ver Genoly.kmer.kmers).
+
+Las rutas registradas con ``POST /api/upload/register`` deben caer dentro
+de los directorios de datos permitidos (ver
+:data:`GENOLY_ALLOWED_DATA_DIRS` en :mod:`ui.backend.security`).
 """
 
-import json
 import os
 import re
-import threading
+import time
 from pathlib import Path
 from tempfile import gettempdir
 from typing import Optional
 
 from fastapi import HTTPException
+
+from ui.backend.registry import JsonRegistry
+from ui.backend.security import check_data_path
 
 UPLOAD_DIR = Path(
     os.environ.get("GENOLY_UPLOAD_DIR")
@@ -45,33 +53,8 @@ _REGISTRY_PATH = UPLOAD_DIR / "registry.json"
 
 _UPLOAD_RE = re.compile(r"^[0-9a-f]{32}$")
 
-#: Directorios permitidos para el registro de rutas del servidor
-#: (variable de entorno GENOLY_ALLOWED_DATA_DIRS, separada por comas).
-#: Vacío = permitir cualquier archivo legible del servidor (herramienta
-#: local; documentado como vía de ingestión de datos propios).
-_ALLOWED_DATA_DIRS = [
-    Path(p).expanduser().resolve()
-    for p in os.environ.get("GENOLY_ALLOWED_DATA_DIRS", "").split(",")
-    if p.strip()
-]
-
-_lock = threading.Lock()
-
-
-def _load_registry() -> dict:
-    if not _REGISTRY_PATH.is_file():
-        return {}
-    try:
-        return json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_registry(data: dict) -> None:
-    tmp = _REGISTRY_PATH.with_name(_REGISTRY_PATH.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    tmp.replace(_REGISTRY_PATH)
+#: Registro compartido con los procesos trabajadores (candado inter-proceso).
+_registry = JsonRegistry(_REGISTRY_PATH)
 
 
 def get_upload(upload_id: str) -> Optional[dict]:
@@ -79,8 +62,7 @@ def get_upload(upload_id: str) -> Optional[dict]:
     if not _UPLOAD_RE.match(upload_id or ""):
         raise HTTPException(status_code=400,
                             detail="Identificador de subida inválido")
-    with _lock:
-        return _load_registry().get(upload_id)
+    return _registry.get(upload_id)
 
 
 def create_upload(upload_id: str, kind: str, path: Path, filename: str,
@@ -93,6 +75,7 @@ def create_upload(upload_id: str, kind: str, path: Path, filename: str,
         "path": str(path),
         "filename": filename,
         "bytes_on_disk": bytes_on_disk,
+        "created_at": time.time(),
         "stats_status": "pending",     # pending | ready | error
         "records": None,
         "total_bases": None,
@@ -100,72 +83,54 @@ def create_upload(upload_id: str, kind: str, path: Path, filename: str,
         "sha256": None,
         "error": None,
     }
-    with _lock:
-        data = _load_registry()
-        data[upload_id] = meta
-        _save_registry(data)
+    _registry.set(upload_id, meta)
     return dict(meta)
 
 
 def set_checksum(upload_id: str, sha256: Optional[str]) -> None:
     """Guarda el checksum SHA-256 (hex) de una subida ya registrada."""
-    with _lock:
-        data = _load_registry()
-        meta = data.get(upload_id)
-        if meta is None:
-            return
-        meta["sha256"] = sha256
-        _save_registry(data)
+    _registry.update_entry(upload_id,
+                           lambda meta: meta.__setitem__("sha256", sha256))
 
 
 def set_bytes(upload_id: str, bytes_on_disk: int) -> None:
     """Actualiza los bytes escritos de una subida en curso."""
-    with _lock:
-        data = _load_registry()
-        meta = data.get(upload_id)
-        if meta is None:
-            return
-        meta["bytes_on_disk"] = bytes_on_disk
-        _save_registry(data)
+    _registry.update_entry(
+        upload_id,
+        lambda meta: meta.__setitem__("bytes_on_disk", bytes_on_disk))
 
 
 def set_stats(upload_id: str, records: int, total_bases: int, first=None,
               *, error: Optional[str] = None) -> None:
     """Actualiza las estadísticas (o el error) de una subida ya registrada."""
-    with _lock:
-        data = _load_registry()
-        meta = data.get(upload_id)
-        if meta is None:
-            return
+    def _apply(meta: dict) -> None:
         meta["records"] = records
         meta["total_bases"] = total_bases
         meta["first"] = first
         meta["stats_status"] = "error" if error else "ready"
         meta["error"] = error
-        _save_registry(data)
+
+    _registry.update_entry(upload_id, _apply)
 
 
 def upload_path(upload_id: str) -> Path:
     """
     Resuelve la ruta real del archivo de una subida (multipart o
-    registrada) validando el identificador. Las subidas antiguas (sin
-    entrada de registro) se resuelven por el nombre en ``UPLOAD_DIR``.
+    registrada) validando el identificador. Si no está en el registro,
+    la subida ya no existe (404).
     """
     if not _UPLOAD_RE.match(upload_id or ""):
         raise HTTPException(status_code=400,
                             detail="Identificador de subida inválido")
     meta = get_upload(upload_id)
-    if meta is not None:
-        path = Path(meta["path"])
-        if path.is_file():
-            return path
+    if meta is None:
         raise HTTPException(status_code=404,
                             detail="El archivo subido ya no existe")
-    legacy = UPLOAD_DIR / f"{upload_id}.fasta"
-    if legacy.is_file():
-        return legacy
-    raise HTTPException(status_code=404,
-                        detail="El archivo subido ya no existe")
+    path = Path(meta["path"])
+    if not path.is_file():
+        raise HTTPException(status_code=404,
+                            detail="El archivo subido ya no existe")
+    return path
 
 
 def check_registrable(path: Path) -> Path:
@@ -173,22 +138,25 @@ def check_registrable(path: Path) -> Path:
     Valida una ruta del servidor para el registro de subidas.
 
     - Debe existir y ser un archivo regular legible.
-    - Si ``GENOLY_ALLOWED_DATA_DIRS`` está configurada, la ruta debe
-      quedar dentro de uno de esos directorios.
+    - Debe estar dentro de un directorio de datos permitido
+      (``GENOLY_ALLOWED_DATA_DIRS``; por defecto la raíz del proyecto y el
+      propio directorio de subidas).
+    - No puede ser una ruta sensible del sistema (/etc, ~/.ssh, .env, ...).
 
     Devuelve la ruta resuelta y absoluta.
     """
-    src = path.expanduser().resolve()
-    if not src.is_file():
-        raise HTTPException(status_code=400,
-                            detail="La ruta no existe o no es un archivo")
+    src = check_data_path(path, extra=(UPLOAD_DIR,))
     if not os.access(src, os.R_OK):
         raise HTTPException(status_code=400,
                             detail="El archivo no es legible")
-    if _ALLOWED_DATA_DIRS:
-        if not any(src.is_relative_to(base) for base in _ALLOWED_DATA_DIRS):
-            raise HTTPException(
-                status_code=403,
-                detail="La ruta está fuera de los directorios de datos "
-                       "permitidos (GENOLY_ALLOWED_DATA_DIRS)")
     return src
+
+
+def all_uploads() -> dict:
+    """Copia del registro completo de subidas (para mantenimiento)."""
+    return dict(_registry.locked_read())
+
+
+def delete_upload(upload_id: str) -> None:
+    """Elimina la entrada de una subida del registro."""
+    _registry.update(lambda data: data.pop(upload_id, None))

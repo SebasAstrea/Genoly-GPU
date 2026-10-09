@@ -15,13 +15,13 @@ Uso:
     python descargar_datos_test.py
 """
 
+import gzip
 import shutil
 import sys
 import urllib.request
 import zipfile
-import gzip
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 RAIZ = Path(__file__).resolve().parent
 DESTINO = RAIZ / "datos_reales"

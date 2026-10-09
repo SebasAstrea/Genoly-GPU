@@ -8,33 +8,30 @@ o directamente:
 """
 
 import os
-import sys
+import shutil
 import unittest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
 
 from Genoly import (
     DeviceManager,
-    FastaRecord,
     FastaReader,
-    write_fasta,
-    FastqRecord,
-    write_fastq,
+    FastaRecord,
     FastqReader,
-    SequenceEncoder,
-    QualityAnalyzer,
-    KmerCounter,
-    VariantCaller,
-    Read,
-    LinearMixedModel,
+    FastqRecord,
     GenomicBLUP,
+    KmerCounter,
+    LinearMixedModel,
+    QualityAnalyzer,
+    Read,
+    SequenceEncoder,
+    VariantCaller,
     build_kinship,
     prepare_quantitative_data,
+    write_fasta,
+    write_fastq,
 )
 from Genoly.core.gpu_setup import GpuSetup, recommend_cuda_tag
-
 
 SEQ = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
 
@@ -47,6 +44,29 @@ class TestDevice(unittest.TestCase):
     def test_get_device(self):
         d = DeviceManager('cpu').device
         self.assertEqual(d.type, 'cpu')
+
+    def test_genoly_device_desde_entorno(self):
+        """GENOLY_DEVICE fija el dispositivo por defecto del proceso."""
+        original = os.environ.get('GENOLY_DEVICE')
+
+        def restore():
+            if original is None:
+                os.environ.pop('GENOLY_DEVICE', None)
+            else:
+                os.environ['GENOLY_DEVICE'] = original
+
+        self.addCleanup(restore)
+
+        os.environ['GENOLY_DEVICE'] = 'cpu'
+        self.assertEqual(DeviceManager().device.type, 'cpu')
+        # el argumento explicito tiene prioridad sobre la variable
+        os.environ['GENOLY_DEVICE'] = 'cpu'
+        self.assertEqual(DeviceManager('cpu:0').device.type, 'cpu')
+        # vacia o ausente = auto-deteccion
+        os.environ['GENOLY_DEVICE'] = ''
+        self.assertTrue(DeviceManager().device.type in ('cuda', 'cpu'))
+        os.environ.pop('GENOLY_DEVICE', None)
+        self.assertTrue(DeviceManager().device.type in ('cuda', 'cpu'))
 
 
 class TestIO(unittest.TestCase):
@@ -437,11 +457,13 @@ class TestDataset(unittest.TestCase):
     """Descubrimiento y registro de datasets NCBI (múltiples FASTA)."""
 
     def setUp(self):
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
+
         from ui.backend import datasets as ds
         self.ds = ds
         self.tmp = tempfile.mkdtemp(prefix='ds_test_')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self._orig_dir = ds._DATASETS_DIR
         ds._DATASETS_DIR = Path(self.tmp)
         ds._REGISTRY_PATH = Path(self.tmp) / 'registry.json'
@@ -452,7 +474,7 @@ class TestDataset(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _mkfasta(self, path, seqs):
-        from Genoly import write_fasta, FastaRecord
+        from Genoly import FastaRecord, write_fasta
         os.makedirs(os.path.dirname(path), exist_ok=True)
         write_fasta(path, [FastaRecord(id=f's{i}', sequence=s)
                            for i, s in enumerate(seqs)], line_width=20)
@@ -585,7 +607,10 @@ class TestPreprocess(unittest.TestCase):
 
     def test_clean_grid_robusto(self):
         from Genoly.quantitative.preprocess import (
-            clean_grid, load_grid, profile_grid, scan_grid_stats,
+            clean_grid,
+            load_grid,
+            profile_grid,
+            scan_grid_stats,
         )
         path = os.path.join(self.tmpdir, 'sucio.csv')
         with open(path, 'w') as fh:

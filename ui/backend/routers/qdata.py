@@ -3,20 +3,22 @@ Carga robusta de datos para genética cuantitativa (CSV/Excel sucios).
 
 - POST /api/qdata/preview -> perfil del archivo subido (delimitador,
   cabecera, columnas con tipo y datos perdidos, filas de ejemplo).
-- POST /api/qdata/clean    -> limpieza/imputación/filtrado en un proceso
-  aislado; guarda la matriz limpia como subida (``clean_id``) y devuelve
-  el reporte.
-- GET  /api/qdata/{id}     -> matriz limpia {phenotypes, genotypes,
+- GET  /api/qdata/{id}/grid-full   -> matriz completa como JSON (para la
+  interfaz interactiva estilo hoja de cálculo).
+- POST /api/qdata/apply-filters    -> envía el resultado del filtrado
+  interactivo; se aplica clean_grid y se guarda con un ``clean_id``.
+- POST /api/qdata/clean            -> limpieza automática (parámetros fijos) en proceso aislado.
+- GET  /api/qdata/{id}             -> matriz limpia {phenotypes, genotypes,
   markers, report} para enviar a los modelos.
 """
 
 import json
 from pathlib import Path
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from ui.backend import jobs
 from ui.backend.uploads import UPLOAD_DIR, create_upload, get_upload, upload_path
@@ -27,6 +29,24 @@ router = APIRouter(prefix="/api/qdata", tags=["qdata"])
 class QDataPreviewRequest(BaseModel):
     upload_id: str
     max_rows: int = 2000
+
+
+class GridFullRequest(BaseModel):
+    """Pide la grid completa de un archivo ya subido."""
+    upload_id: str
+    max_rows: Optional[int] = None
+
+
+class ApplyFiltersRequest(BaseModel):
+    """Envía una grid filtrada/limpiada por el cliente + opciones de clean_grid."""
+    rows: List[List[Optional[str]]]  # filas que quedaron tras filtro del frontend
+    phenotype_col: int = 0
+    impute_method: str = "media"
+    max_column_missingness: float = 1.0
+    min_individuals: int = 5
+    min_markers: int = 2
+    min_maf: float = 0.0
+    hwe_p: Optional[float] = None
 
 
 class QDataCleanRequest(BaseModel):
@@ -81,6 +101,60 @@ def preview(req: QDataPreviewRequest) -> dict:
         "column_names": profile["column_names"],
         "header_detected": profile["header_detected"],
     }
+
+
+@router.post("/{upload_id}/grid-full")
+def grid_full(upload_id: str, req: GridFullRequest) -> dict:
+    """Devuelve la grid completa para filtrado interactivo en el navegador."""
+    from Genoly.quantitative.preprocess import load_grid, profile_grid
+
+    path = upload_path(upload_id)
+    try:
+        grid = load_grid(path, max_rows=req.max_rows)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Archivo ilegible: {exc}")
+
+    profile = profile_grid(grid)
+    return {
+        "upload_id": upload_id,
+        "rows_total": len(grid),
+        "columns": profile["columns"],
+        "column_names": profile["column_names"],
+        "header_detected": profile["header_detected"],
+        "grid": grid,  # <-- TODAS las filas como matriz de strings/nulls
+    }
+
+
+@router.post("/apply-filters", response_model=QDataJobResponse)
+async def apply_filters(req: ApplyFiltersRequest) -> QDataJobResponse:
+    """Filtra/limpia la grid enviada por el frontend con clean_grid."""
+    from Genoly.quantitative.preprocess import clean_grid
+
+    if req.impute_method not in ("media", "moda"):
+        raise HTTPException(status_code=422,
+                            detail="impute_method debe ser 'media' o 'moda'")
+
+    clean_id = uuid4().hex
+    clean_path = UPLOAD_DIR / f"{clean_id}.json"
+    create_upload(clean_id, "qdata", Path(clean_path), "limpio.json", 0)
+
+    job = jobs.manager.create("apply_filters")
+    jobs.manager.submit_process(job, {
+        "kind": "apply_filters",
+        "grid_rows": req.rows,
+        "out_path": str(clean_path),
+        "out_upload_id": clean_id,
+        "phenotype_col": req.phenotype_col,
+        "impute_method": req.impute_method,
+        "max_column_missingness": req.max_column_missingness,
+        "min_individuals": req.min_individuals,
+        "min_markers": req.min_markers,
+        "min_maf": req.min_maf,
+        "hwe_p": req.hwe_p,
+    })
+    return QDataJobResponse(job_id=job.id,
+                            events_url=f"/api/jobs/{job.id}/events",
+                            clean_id=clean_id)
 
 
 @router.post("/clean", response_model=QDataJobResponse)

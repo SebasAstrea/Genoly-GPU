@@ -1,5 +1,6 @@
 import urllib.request
 
+
 def descargar_fasta(accession, filename):
     """Descarga una secuencia FASTA desde NCBI dado su número de acceso."""
     # Construye la URL para la API efetch de NCBI

@@ -1,40 +1,65 @@
-# Git
+# Nota: Docker solo lee el .dockerignore de la RAIZ del build context
+# (docker-compose usa `context: ..`), por eso este fichero es el único
+# efectivo. docker/.dockerignore se mantiene sincronizado por si se
+# construye con otro context.
+
+# Git y contexto local
 .git
 .gitignore
+context/
+comando.txt
+contexto.md
+.pytest_cache/
 
-# Entornos / secretos
-.env
-.venv
+# Entornos y caches de Python
+.venv/
 venv/
-env/
-ENV/
-
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
+**/__pycache__/
+**/*.py[cod]
 *.egg-info/
-build/
-dist/
-*.log
 
-# UI (se reconstruye dentro de la imagen)
-node_modules/
-ui/frontend/node_modules/
-ui/frontend/dist/
-
-# Datos genómicos grandes / descargas
+# Datos genomicos grandes (no viajan en la imagen: ~9 GB)
+datos_reales/
+ncbi_dataset*/
+*.fasta
+*.fa
+*.ffn
+*.faa
+*.fna
+*.fasta.gz
+*.fa.gz
+*.fna.gz
 *.fastq
 *.fastq.gz
+*.fq
+*.fq.gz
 *.bam
 *.bai
+*.cram
+*.crai
 *.vcf
 *.vcf.gz
+*.bcf
 *.sam
+*.gff
+*.gff3
+*.gtf
 pantera
 
-# No necesarios en el contenedor
+# Dependencias y artefactos de la UI (npm ci los regenera en el build)
+ui/frontend/node_modules/
+ui/frontend/dist/
+node_modules/
+
+# Contenido no necesario para la imagen
+docker/
 tests/
 examples/
-*.spec
-*.ps1
+docs/
+.github/
+*.log
+.vscode/
+.idea/
+.ruff_cache/
+.pytest_cache/

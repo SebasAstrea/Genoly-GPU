@@ -14,7 +14,7 @@ resultados se devuelven como listas Python listas para JSON.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import torch
 
@@ -122,7 +122,6 @@ class TSNEReducer:
         else:
             Mc = M
 
-        gen = torch.Generator(device="cpu").manual_seed(seed)
         n_neighbors = min(n - 1, max(3, int(3 * perplexity)))
 
         # distancias y vecinos
@@ -147,7 +146,10 @@ class TSNEReducer:
         Pmat = (Pmat + Pmat.t()) / (2 * n)
         Pmat = Pmat.clamp(min=1e-12)
 
-        # inicialización aleatoria
+        # inicialización aleatoria (reproducible: siembra CPU y CUDA; el
+        # generador no servía porque torch.randn en GPU exige un
+        # generator del mismo device)
+        torch.manual_seed(seed)
         Y = torch.randn(n, n_components, device=self.device) * 1e-4
         velocity = torch.zeros_like(Y)
         momentum = 0.5

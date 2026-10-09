@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { api } from '../api.js'
 import { Card, StatCard, Badge, Bar, PageHeader } from '../components/ui.jsx'
 import { useQData } from '../qdata.jsx'
+import FiltableGrid from './FiltableGrid.jsx'
 import {
   IconServer,
   IconList,
@@ -182,6 +183,35 @@ export default function Datos() {
       setCleanResult({ ...res, n_individuals: matrix.phenotypes.length })
     } catch (e) {
       setError(e.message)
+    } finally {
+      setRunning(false)
+      setProgress(null)
+    }
+  }
+
+  // Handle interactive grid "Apply clean" callback
+  const handleGridCleaned = async (filteredRows) => {
+    if (!upload || !filteredRows?.length) return
+    setRunning(true)
+    setError(null)
+    setCleanResult(null)
+    try {
+      const job = await api.qdataApplyFilters({
+        rows: filteredRows,
+        phenotype_col: options.phenotype_col,
+        impute_method: options.impute_method,
+        max_column_missingness: options.max_column_missingness,
+        min_individuals: options.min_individuals,
+        min_markers: options.min_markers,
+        min_maf: options.min_maf,
+        hwe_p: options.hwe_p ? Number(options.hwe_p) : null,
+      })
+      const res = await api.jobEvents(job.job_id, { onProgress: (p) => setProgress(p) })
+      const matrix = await api.qdataGet(res.clean_id)
+      setQdata({ ...matrix, source: upload.filename + ' [filtrado]' })
+      setCleanResult({ ...res, n_individuals: matrix.phenotypes.length })
+    } catch (e) {
+      setError(e.message || 'Error al aplicar limpieza')
     } finally {
       setRunning(false)
       setProgress(null)
@@ -562,31 +592,11 @@ export default function Datos() {
             </>
           )}
 
-          {preview && (
-            <Card title="Vista previa" subtitle={`Delimitador y cabecera detectados · ${fmt(preview.rows_preview)} filas`}
+          {upload && !cleanResult && (
+            <Card title="Vista interactiva" subtitle="Filtra, edita y limpia fila a fila antes de enviar al análisis"
               icon={<IconList className="h-5 w-5" />}
-              actions={<Badge tone={preview.header_detected ? 'ok' : 'warn'}>
-                {preview.header_detected ? 'cabecera' : 'sin cabecera'}</Badge>}>
-              <div className="overflow-x-auto">
-                <table className="table-base min-w-[30rem]">
-                  <thead>
-                    <tr>
-                      {preview.sample_rows[0]?.map((_, j) => (
-                        <th key={j} className="text-xs">{preview.column_names[j] ?? `col_${j + 1}`}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.sample_rows.map((row, i) => (
-                      <tr key={i}>
-                        {row.map((cell, j) => (
-                          <td key={j} className="font-mono text-xs">{cell ?? ''}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              actions={running ? <Badge tone="warn">limpiando…</Badge> : null}>
+              <FiltableGrid uploadId={upload.upload_id} onCleaned={handleGridCleaned} />
             </Card>
           )}
 

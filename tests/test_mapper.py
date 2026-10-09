@@ -9,23 +9,26 @@ Ejecutar desde la raiz del proyecto:
 import asyncio
 import os
 import random
-import sys
+import shutil
 import tempfile
+import time
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from ui.backend import jobs
 from Genoly.alignment.mapper import ReadMapper, reverse_complement
 from Genoly.io.fasta import FastaRecord, write_fasta
 from Genoly.io.fastq import FastqRecord, write_fastq
+from ui.backend import jobs
 
 
 def _run_job(spec):
     async def main():
         job = jobs.manager.create(spec.get("kind", "kmer"))
         jobs.manager.submit_process(job, spec)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -63,6 +66,7 @@ def _mkreads(seq, tmpdir, n=200, rate=0.05, length=150):
 class TestReadMapper(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='mapper_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.ref, self.ref_path = _mkref(self.tmpdir)
         self.mapper = ReadMapper(k=15, stride=1, min_seeds=3)
 
@@ -102,6 +106,7 @@ class TestReadMapper(unittest.TestCase):
 class TestMapJobAislado(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='mapjob_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.ref, self.ref_path = _mkref(self.tmpdir, n=30_000)
         _, _, self.reads_path = _mkreads(self.ref, self.tmpdir, n=150)
 

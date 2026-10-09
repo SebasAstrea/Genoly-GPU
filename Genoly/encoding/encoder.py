@@ -1,10 +1,11 @@
-import numpy as np
-import torch
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
-from Genoly.core.device import DeviceManager, get_device
-from Genoly.core.vram import VRAMManager
+import numpy as np
+import torch
+
+from Genoly.core.device import DeviceManager
+from Genoly.core.vram import VRAMManager, retry_on_oom
 
 # Alfabeto canónico para cómputo núcleo
 CANONICAL = ['A', 'C', 'G', 'T', 'N']
@@ -158,6 +159,19 @@ class SequenceEncoder:
             return 8 + 3 * 5 * 4
         return 24
 
+    def _encode_group(self, seqs: List[str], lengths: List[int],
+                      group: List[int], one_hot: bool):
+        """Codifica un micro-lote y devuelve (tensor, longitudes reales).
+
+        Aislado para poder envolverlo en ``retry_on_oom`` desde
+        :meth:`encode_stream`.
+        """
+        if one_hot:
+            return self.encode_one_hot(seqs), [lengths[i] for i in group]
+        tensor, lengths_tensor = self.encode(seqs)
+        return (tensor,
+                [int(v) for v in lengths_tensor.cpu().tolist()])
+
     def encode_stream(self,
                       batches: Iterable[List[str]],
                       one_hot: bool = False,
@@ -195,12 +209,10 @@ class SequenceEncoder:
             lengths = [len(s) for s in batch]
             for group in manager.plan_micro_batches(lengths, cost):
                 seqs = [batch[i] for i in group]
-                if one_hot:
-                    tensor = self.encode_one_hot(seqs)
-                    chunk_lengths = [lengths[i] for i in group]
-                else:
-                    tensor, lengths_tensor = self.encode(seqs)
-                    chunk_lengths = [int(v) for v in lengths_tensor.cpu().tolist()]
+                tensor, chunk_lengths = retry_on_oom(
+                    lambda: self._encode_group(seqs, lengths, group,
+                                               one_hot),
+                    manager=manager)
                 yield EncodedBatch(
                     tensor=tensor,
                     lengths=chunk_lengths,
@@ -230,19 +242,25 @@ class SequenceEncoder:
             raise ValueError("La lista de secuencias está vacía")
 
         encoded, lengths = self.encode(sequences)
-        # Mapear canónicas: A,C,G,T,N -> 0,1,2,3,4
-        canonical_idx = encoded % 5 if self.num_classes == 15 else encoded
+        # A/C/G/T conservan su índice. N y cualquier código IUPAC de
+        # ambigüedad (R, Y, S, W, K, M, B, D, H, V) se agrupan en la clase N.
+        # Antes se usaba ``encoded % 5``, que mapeaba R->A, Y->C, S->G, W->T,
+        # K->A, M->C... y enmascaraba las bases ambiguas como canónicas.
+        canonical_idx = torch.where(encoded < 4, encoded,
+                                    torch.full_like(encoded, 4))
         num_classes = 5 if include_n else 4
 
         one_hot = torch.zeros(
             (*encoded.shape, num_classes), dtype=torch.float32, device=self.device
         )
-        mask = canonical_idx < num_classes
+        valid_class = canonical_idx < num_classes
         canonical_idx = canonical_idx.clamp(0, num_classes - 1)
         one_hot.scatter_(-1, canonical_idx.unsqueeze(-1), 1.0)
-        # Ceros en posiciones padding
-        one_hot = one_hot * mask.unsqueeze(-1).float()
-        return one_hot
+        # Ceros en posiciones padding (más allá de la longitud real) y en las
+        # bases que no tienen clase asignada (N con include_n=False).
+        positions = torch.arange(encoded.shape[1], device=self.device)
+        real = positions.unsqueeze(0) < lengths.unsqueeze(1)
+        return one_hot * (valid_class & real).unsqueeze(-1).float()
 
     # ------------------------------------------------------------------ #
     # Decodificación

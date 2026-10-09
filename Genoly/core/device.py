@@ -1,6 +1,8 @@
-import torch
+import os
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Any, Optional
+
+import torch
 
 
 @dataclass
@@ -31,8 +33,33 @@ class DeviceManager:
     @staticmethod
     def _resolve_device(device: Optional[str]) -> torch.device:
         if device is None:
+            # Variable de entorno: fija el dispositivo por defecto para todo
+            # el proceso (la usan Docker y docker-compose para elegir la
+            # rama CPU/GPU). Vacía o ausente = auto-detección.
+            env = os.environ.get("GENOLY_DEVICE", "").strip()
+            if env:
+                device = env
+        if device is None:
             return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        return torch.device(device)
+        resolved = torch.device(device)
+        if resolved.type != 'cuda':
+            return resolved
+        # Fallo temprano y explicable: sin esta comprobación, pedir
+        # device='cuda' sin CUDA solo revienta en la primera operación
+        # de tensor (mucho más lejos de la causa).
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                f"Se pidió el dispositivo '{device}' (argumento o variable "
+                "de entorno GENOLY_DEVICE) pero CUDA no está disponible en "
+                "este entorno. Usa device='cpu' (o None / GENOLY_DEVICE "
+                "vacío para auto-detección) o instala PyTorch con soporte "
+                "CUDA.")
+        index = resolved.index
+        if index is not None and index >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"Se pidió el dispositivo '{device}' pero solo hay "
+                f"{torch.cuda.device_count()} GPU(s) disponibles.")
+        return resolved
 
     @property
     def is_cuda(self) -> bool:

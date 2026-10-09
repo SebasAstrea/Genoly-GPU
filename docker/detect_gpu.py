@@ -3,12 +3,11 @@
 Detector de GPU para Genoly-GPU.
 Usado por el script de lanzamiento y por el sistema de build.
 """
-import subprocess
 import json
 import re
-import sys
-import os
-from typing import List, Dict, Optional, Tuple
+import subprocess
+from typing import Dict, List, Optional
+
 
 def detect_nvidia_gpus() -> List[Dict]:
     """Detecta GPUs NVIDIA usando nvidia-smi."""

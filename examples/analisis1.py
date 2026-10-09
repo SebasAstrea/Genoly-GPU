@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from Bio import SeqIO
 from Bio.SeqUtils import gc_fraction  # CORRECTO para Biopython ≥1.79
 import matplotlib.pyplot as plt
@@ -6,9 +8,12 @@ import matplotlib.pyplot as plt
 # Puedes descargar uno real de: https://www.ncbi.nlm.nih.gov/nuccore/NC_045512
 # O usar este ejemplo mínimo
 
+# El fichero se busca junto a este script, no en el directorio de trabajo
+_SEQDUMP = Path(__file__).with_name("seqdump.txt")
+
 def crear_ejemplo_fasta():
     
-    with open("seqdump.txt", "r") as f:
+    with open(_SEQDUMP, "r") as f:
         contenido = f.read()
 # Crear archivo de ejemplo (si no tienes uno)
 crear_ejemplo_fasta()
@@ -20,7 +25,7 @@ print("=" * 60)
 
 # 1. Leer y analizar secuencias
 secuencias_info = []
-for record in SeqIO.parse("seqdump.txt", "fasta"):
+for record in SeqIO.parse(_SEQDUMP, "fasta"):
     # Información básica
     info = {
         'id': record.id,

@@ -29,16 +29,31 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from Genoly import __version__
 from Genoly.core.gpu_setup import GpuSetup
-
+from ui.backend import security
 from ui.backend.routers import (
-    device, qc, kmer, variants, upload, quantitative, gblup, jobs, dataset,
-    map as map_router, downstream, annotation, report, qdata,
+    annotation,
+    dataset,
+    device,
+    downstream,
+    gblup,
+    jobs,
+    kmer,
+    qc,
+    qdata,
+    quantitative,
+    report,
+    upload,
+    variants,
+)
+from ui.backend.routers import (
+    map as map_router,
 )
 
 logger = logging.getLogger("genoly.ui")
@@ -70,8 +85,26 @@ def _spill_cleaner_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    security.warn_if_open()
     threading.Thread(target=_spill_cleaner_loop, daemon=True).start()
+    threading.Thread(target=_upload_cleaner_loop, daemon=True).start()
     yield
+
+
+def _upload_cleaner_loop() -> None:
+    """Aplica el TTL de subidas, datasets y extracciones (si está activo)."""
+    from ui.backend.maintenance import UPLOAD_TTL_SECONDS, run_cleanup
+    while True:
+        time.sleep(CLEANUP_INTERVAL)
+        if not UPLOAD_TTL_SECONDS:
+            continue
+        try:
+            removed = run_cleanup()
+            if removed:
+                logger.info("Limpieza por TTL: %d elementos eliminados",
+                            removed)
+        except Exception as exc:  # nunca deja caer el servidor
+            logger.warning("Error en la limpieza por TTL: %s", exc)
 
 
 app = FastAPI(
@@ -81,13 +114,32 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: permitir el dev server de Vite durante desarrollo
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: solo los orígenes declarados (por defecto el dev server de Vite).
+# En producción el frontend se sirve desde este mismo FastAPI, así que no
+# hace falta ningún origen: lista vacía = sin CORS.
+_origins = security.cors_origins()
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+    )
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    """Exige la API key en /api/* si GENOLY_API_KEY está definida."""
+    path = request.url.path
+    if path.startswith("/api/") and not security.is_authorized(
+            request.headers, request.query_params, path):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Falta o no coincide la clave de API "
+                               "(cabecera X-API-Key o ?api_key=)"},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
 
 app.include_router(device.router)
 app.include_router(qc.router)

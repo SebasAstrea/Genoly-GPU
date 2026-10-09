@@ -1,7 +1,7 @@
 from Genoly.encoding.encoder import (
-    SequenceEncoder,
     CANONICAL,
     IUPAC,
+    SequenceEncoder,
     encode_to_tensor,
 )
 

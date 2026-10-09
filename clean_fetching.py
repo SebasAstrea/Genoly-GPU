@@ -1,5 +1,6 @@
 import requests
 
+
 def descargar_archivo(url, filename):
     try:
         # 1. Petición con stream para eficiencia

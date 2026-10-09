@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import tempfile
@@ -9,13 +10,20 @@ import numpy as np
 import torch
 
 from Genoly.core.device import DeviceManager
-from Genoly.core.vram import VRAMManager, estimate_kmer_bytes_per_base
+from Genoly.core.vram import (
+    VRAMManager,
+    estimate_kmer_bytes_per_base,
+    is_cuda_oom,
+    retry_on_oom,
+)
 from Genoly.encoding.encoder import SequenceEncoder
 from Genoly.io.fasta import (
     DEFAULT_BLOCK_SIZE,
     FASTA_CODE_INVALID,
     FastaReader,
 )
+
+logger = logging.getLogger("genoly.kmers")
 
 #: Unidades (registros/ventanas) agrupadas por lote de RAM antes de
 #: planificar los micro-lotes de GPU.
@@ -212,7 +220,6 @@ class _PartitionedKmerAccumulator:
         self._buffered = [0] * n_partitions
         self._files: List[List[Tuple[Path, Path]]] = [
             [] for _ in range(n_partitions)]
-        self.total_rows = 0
 
     def add(self, values: torch.Tensor, counts: torch.Tensor) -> None:
         """
@@ -261,7 +268,6 @@ class _PartitionedKmerAccumulator:
             offset += int(size)
 
             self._buffered[p] += int(size)
-            self.total_rows += int(size)
             if self._buffered[p] >= self.spill_rows:
                 self._spill(p)
 
@@ -785,7 +791,9 @@ class KmerCounter:
             window_size: Máximo de bases por ventana. Las secuencias más
                          largas se parten en ventanas con solape de k-1
                          bases para limitar el consumo de VRAM/RAM al
-                         procesar genomas completos.
+                         procesar genomas completos. ``None`` o ``0`` =
+                         sin ventanado (como el resto de la API);
+                         ``> 0`` = ese tamaño.
 
         Returns:
             Tuple (valores únicos, conteos) ordenados por frecuencia
@@ -794,7 +802,8 @@ class KmerCounter:
         if not sequences:
             return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)
 
-        if window_size is not None:
+        # 0 y None significan "sin ventanado", igual que en count_stream
+        if window_size:
             expanded = []
             for seq in sequences:
                 expanded.extend(self.split_sequence_windows(seq, k, window_size))
@@ -809,15 +818,36 @@ class KmerCounter:
         if chunk_size is None:
             chunk_size = len(sequences)
 
+        # Este camino no planifica micro-lotes: si un lote no cabe en la
+        # VRAM libre, en lugar de morir se parte el chunk por la mitad y
+        # se reintenta (con la caché liberada) hasta que quepa.
+        manager = (VRAMManager(self.device)
+                   if getattr(self.device, "type", None) == "cuda" else None)
+
         all_values = []
         all_counts = []
 
-        for start in range(0, len(sequences), chunk_size):
-            chunk = sequences[start:start + chunk_size]
-            values, counts = self._count_micro_batch(chunk, k, canonical)
+        size = max(1, int(chunk_size))
+        start = 0
+        while start < len(sequences):
+            chunk = sequences[start:start + size]
+            try:
+                values, counts = self._count_micro_batch(chunk, k, canonical)
+            except Exception as exc:
+                if manager is None or len(chunk) < 2 or not is_cuda_oom(exc):
+                    raise
+                size = max(1, len(chunk) // 2)
+                manager.release()
+                logger.warning(
+                    "CUDA sin memoria con %d secuencias; se parte el lote "
+                    "y se reintenta con %d", len(chunk), size)
+                continue
             if values is not None:
-                all_values.append(values)
-                all_counts.append(counts)
+                # Acumular en CPU acota la VRAM al micro-lote actual: en GPU
+                # el pico llegaba a ~3x el tamaño final (chunks + cat + sort).
+                all_values.append(values.to("cpu"))
+                all_counts.append(counts.to("cpu"))
+            start += len(chunk)
 
         if not all_values:
             return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)
@@ -966,10 +996,16 @@ class KmerCounter:
                 stats["micro_batches"] += 1
                 stats["units_done"] += len(group)
                 stats["bases_done"] += sum(lengths[i] for i in group)
-                codes_t = torch.from_numpy(codes).to(self.device)
-                values, counts = self._count_codes_micro_batch(
-                    codes_t, k, canonical)
-                del codes_t, codes
+                def _run_batch(codes=codes):
+                    codes_t = torch.from_numpy(codes).to(self.device)
+                    try:
+                        return self._count_codes_micro_batch(
+                            codes_t, k, canonical)
+                    finally:
+                        del codes_t
+
+                values, counts = retry_on_oom(_run_batch, manager=manager)
+                del codes
                 micro_index += 1
                 if manager.release_after_each and (
                         micro_index % manager.release_every == 0):
@@ -1029,7 +1065,9 @@ class KmerCounter:
             lengths = [len(u) for u in batch]
             for group in manager.plan_micro_batches(lengths, bytes_per_base):
                 seqs = [batch[i] for i in group]
-                values, counts = self._count_micro_batch(seqs, k, canonical)
+                values, counts = retry_on_oom(
+                    lambda s=seqs: self._count_micro_batch(s, k, canonical),
+                    manager=manager)
                 stats["micro_batches"] += 1
                 stats["units_done"] += len(group)
                 stats["bases_done"] += sum(lengths[i] for i in group)
@@ -1480,7 +1518,8 @@ class KmerCounter:
             return v, c.to(torch.int64)
 
         # Todo debe vivir en el dispositivo de entrada: la ruta en RAM
-        # (count) pasa tensores de CUDA y la de streaming, de CPU.
+        # (count) acumula en CPU para no retener VRAM, y la de streaming
+        # cede los micro-lotes en CPU.
         device = v.device
         new = torch.empty(v.shape[0], dtype=torch.bool, device=device)
         new[0] = True

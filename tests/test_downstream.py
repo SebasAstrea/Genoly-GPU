@@ -6,25 +6,29 @@ Ejecutar desde la raiz del proyecto:
 """
 
 import asyncio
-import os
-import sys
+import time
 import unittest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import torch
 
-from ui.backend import jobs
 from Genoly.downstream.reduction import (
-    DownstreamAnalyzer, KMeans, PCAReducer, TSNEReducer,
+    DownstreamAnalyzer,
+    KMeans,
+    PCAReducer,
+    TSNEReducer,
 )
+from ui.backend import jobs
 
 
 def _run_job(spec):
     async def main():
         job = jobs.manager.create(spec.get("kind", "downstream"))
         jobs.manager.submit_process(job, spec)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -44,7 +48,7 @@ def _purity(labels, truth):
     k = max(labels) + 1
     total = 0
     for c in range(k):
-        members = [truth[i] for i, l in enumerate(labels) if l == c]
+        members = [truth[i] for i, lab in enumerate(labels) if lab == c]
         if members:
             total += Counter(members).most_common(1)[0][1]
     return total / len(truth)

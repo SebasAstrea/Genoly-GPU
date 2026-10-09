@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genoly-gpu"
+version = "0.2.0"
+description = "Software de aceleracion por GPU (NVIDIA/CUDA) para el analisis de grandes datos del genoma"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Genoly-GPU", email = "sebasdeasturias@gmail.com" }]
+keywords = ["bioinformatics", "gpu", "cuda", "k-mers", "variant-calling", "genomics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+# Mismas dependencias que requirements.txt: pip install . == pip install -r.
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.20.0",
+    "biopython>=1.79",
+    "matplotlib>=3.5",
+    "requests>=2.25",
+    "openpyxl>=3.1",
+    "parasail>=1.3.4",
+    "pysam>=0.22",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# Backend web (ui/backend): no hace falta para usar Genoly como librería.
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+]
+dev = [
+    "pytest>=7.4",
+    "httpx>=0.27",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/beoasaver-boop/Genoly-GPU"
+Repository = "https://github.com/beoasaver-boop/Genoly-GPU"
+
+[tool.setuptools.packages.find]
+include = ["Genoly*"]
+exclude = ["tests*", "examples*", "ui*", "docker*", "docs*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: pruebas largas",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = [
+    "ui/frontend",
+    "examples",
+    "docs",
+    ".venv",
+    "dist",
+]
+
+[tool.ruff.lint]
+# Errores reales y estilo mínimo: F (pyflakes) + E9 (sintaxis) + I (imports).
+# No se activan reglas estrictas de estilo para no reformatear el código
+# existente entero.
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# main.py hace bootstrap de sys.path ANTES de importar la app: los imports
+# no pueden ir todos arriba.
+"ui/backend/main.py" = ["E402"]

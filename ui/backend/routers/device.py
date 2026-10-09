@@ -1,10 +1,10 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
 from typing import Optional
 
-from Genoly.core.gpu_setup import GpuSetup
-from Genoly.core.device import DeviceManager
+from fastapi import APIRouter
+from pydantic import BaseModel
 
+from Genoly.core.device import DeviceManager
+from Genoly.core.gpu_setup import GpuSetup
 
 router = APIRouter(prefix="/api/device", tags=["device"])
 

@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 from Genoly.quantitative.lmm import LinearMixedModel, build_kinship
 
-
 router = APIRouter(prefix="/api/quantitative", tags=["quantitative"])
 
 

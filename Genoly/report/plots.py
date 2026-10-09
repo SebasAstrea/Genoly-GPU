@@ -138,8 +138,11 @@ def volcano_svg(fold_changes: Sequence[float], p_values: Sequence[float],
     PW, PH = W - PL - PR, H - PT - PB
     xmax = max(float(np.abs(fc).max()), fc_threshold * 1.2) or 1.0
     ymax = max(float(y.max()), -np.log10(p_threshold) * 1.2) or 1.0
-    X = lambda v: PL + ((v + xmax) / (2 * xmax)) * PW
-    Y = lambda v: PT + (1 - v / ymax) * PH
+    def X(v):
+        return PL + ((v + xmax) / (2 * xmax)) * PW
+
+    def Y(v):
+        return PT + (1 - v / ymax) * PH
 
     parts = [f"<svg xmlns='http://www.w3.org/2000/svg' width='{W}' height='{H}' "
              f"viewBox='0 0 {W} {H}'>",
@@ -194,8 +197,11 @@ def manhattan_svg(positions: Sequence[float], p_values: Sequence[float],
     xmin, xmax = float(pos.min()), float(pos.max())
     xspan = (xmax - xmin) or 1.0
     ymax = max(float(y.max()), -np.log10(sig_threshold) * 1.2) or 1.0
-    X = lambda v: PL + ((v - xmin) / xspan) * PW
-    Y = lambda v: PT + (1 - v / ymax) * PH
+    def X(v):
+        return PL + ((v - xmin) / xspan) * PW
+
+    def Y(v):
+        return PT + (1 - v / ymax) * PH
     sig_line = -np.log10(sig_threshold)
 
     parts = [f"<svg xmlns='http://www.w3.org/2000/svg' width='{W}' height='{H}' "

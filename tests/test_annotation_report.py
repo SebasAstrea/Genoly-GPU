@@ -8,15 +8,14 @@ Ejecutar desde la raiz del proyecto:
 
 import asyncio
 import os
-import sys
+import shutil
 import tempfile
+import time
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from ui.backend import jobs
 from Genoly.annotation.annotator import Annotator, summarize_go
 from Genoly.report.plots import build_report, heatmap_svg, volcano_svg
+from ui.backend import jobs
 
 GFF = """##gff-version 3
 chr1\t.\tgene\t100\t5000\t.\t+\t.\tID=gene1;Name=BRCA1
@@ -33,7 +32,11 @@ def _run_job(spec):
     async def main():
         job = jobs.manager.create(spec.get("kind", "annotation"))
         jobs.manager.submit_process(job, spec)
+        deadline = time.monotonic() + 120
         while job.status not in ("done", "error"):
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"El job {job.id} no terminó en 120 s")
             await asyncio.sleep(0.05)
         return job
     return asyncio.run(main())
@@ -42,6 +45,7 @@ def _run_job(spec):
 class TestAnnotator(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix='ann_')
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.gff = os.path.join(self.tmpdir, 'ann.gff3')
         with open(self.gff, 'w') as fh:
             fh.write(GFF)
@@ -108,6 +112,7 @@ class TestPlots(unittest.TestCase):
 class TestAnnotationJobAislado(unittest.TestCase):
     def test_annotation_en_proceso(self):
         tmpdir = tempfile.mkdtemp(prefix='annjob_')
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         gff = os.path.join(tmpdir, 'ann.gff3')
         with open(gff, 'w') as fh:
             fh.write(GFF)
@@ -123,6 +128,7 @@ class TestAnnotationJobAislado(unittest.TestCase):
 class TestReportJobAislado(unittest.TestCase):
     def test_report_en_proceso(self):
         tmpdir = tempfile.mkdtemp(prefix='repjob_')
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         md = os.path.join(tmpdir, 'report.md')
         job = _run_job({"kind": "report", "title": "Test",
                         "matrix": [[1.0, 2.0], [3.0, 4.0], [2.0, 1.0]],

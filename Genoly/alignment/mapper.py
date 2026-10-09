@@ -22,7 +22,6 @@ minimizers con derrame a disco es una mejora posterior).
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Callable, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
@@ -148,7 +147,7 @@ class ReadMapper:
                 bad += 1
                 v = 0
             code = (code << 2) | v
-        if bad == 0 and 0 % self.stride == 0:
+        if bad == 0:
             codes.append(code)
             seq_idxs.append(sid)
             positions.append(0)
@@ -186,7 +185,7 @@ class ReadMapper:
                 bad += 1
                 v = 0
             code = (code << 2) | v
-        if bad == 0 and 0 % self.stride == 0:
+        if bad == 0:
             seeds.append((0, code))
         for i in range(1, n - k + 1):
             v_out = int(val[seq[i - 1]])

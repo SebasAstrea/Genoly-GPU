@@ -5,9 +5,10 @@ Análisis descendente (PCA, t-SNE, K-Means).
   aparte); el progreso y el resultado llegan por el SSE de ``events_url``.
 """
 
+from typing import List
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from ui.backend import jobs
 

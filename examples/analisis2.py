@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from Bio import SeqIO, motifs
 from Bio.Restriction import RestrictionBatch, Analysis
 
@@ -32,7 +34,10 @@ def buscar_motivos_consenso(secuencia, motivo="TATAA"):
     return posiciones
 
 # Ejemplo de uso
-for record in SeqIO.parse("ejemplo.fasta", "fasta"):
+# El fichero se busca junto a este script, no en el directorio de trabajo
+_EJEMPLO = Path(__file__).with_name("ejemplo.fasta")
+
+for record in SeqIO.parse(_EJEMPLO, "fasta"):
     tata_positions = buscar_motivos_consenso(record.seq, "TATAA")
     if tata_positions:
         print(f"TATA-box encontrado en {record.id} en posiciones: {tata_positions}")

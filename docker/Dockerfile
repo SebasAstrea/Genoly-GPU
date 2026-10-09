@@ -6,7 +6,7 @@
 #   --build-arg GENOLY_GPU_MODE=gpu   → imagen con CUDA 12.6 (para GPU NVIDIA)
 #
 # Detección automática en tiempo de build (via script):
-#   docker build --build-arg GENOLY_GPU_MODE=$(python detect_gpu_mode.py) .
+#   docker build --build-arg GENOLY_GPU_MODE=$(python docker/detect_gpu.py) .
 # ============================================================================ #
 
 ARG GENOLY_GPU_MODE=cpu
@@ -38,13 +38,22 @@ ENV GENOLY_PORT=$GENOLY_PORT \
 
 WORKDIR /app
 
-# Solo dependencias base (PyTorch CPU)
+# Dependencias base. torch va primero desde el índice CPU: la build que
+# sirve PyPI por defecto incluye CUDA (varios GB) y aquí no se usa; con
+# esto la imagen CPU se queda en unos cientos de MB.
 COPY requirements.txt .
 COPY ui/backend/requirements.txt ./ui/backend/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt -r ui/backend/requirements.txt
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt -r ui/backend/requirements.txt
 
-# Código
+# Código. El paquete se instala con pip (--no-deps: las dependencias ya
+# están en requirements.txt, así no se tira de PyPI otra vez) para que
+# `import Genoly` funcione desde cualquier sitio, no solo desde /app.
+COPY setup.py pyproject.toml README.md ./
 COPY Genoly ./Genoly
+RUN pip install --no-cache-dir --no-deps .
+
+# Código de la API y frontend compilado
 COPY ui/backend ./ui/backend
 COPY --from=frontend-build /app/ui/frontend/dist ./ui/frontend/dist
 
@@ -86,12 +95,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PyTorch con CUDA 12.6 (build probada con RTX 3050)
 COPY requirements.txt .
 COPY ui/backend/requirements.txt ./ui/backend/requirements.txt
-RUN pip3 install --no-cache-dir torch torchvision \
+RUN pip3 install --no-cache-dir 'torch>=2.0.0' 'torchvision>=0.15.0' \
     --index-url https://download.pytorch.org/whl/cu126 && \
     pip3 install --no-cache-dir -r requirements.txt -r ui/backend/requirements.txt
 
-# Código
+# Código (ver rama CPU: se instala el paquete, sin volver a bajar deps)
+COPY setup.py pyproject.toml README.md ./
 COPY Genoly ./Genoly
+RUN pip3 install --no-cache-dir --no-deps .
+
+# Código de la API y frontend compilado
 COPY ui/backend ./ui/backend
 COPY --from=frontend-build /app/ui/frontend/dist ./ui/frontend/dist
 

@@ -33,15 +33,21 @@ Genoly-GPU ofrece las herramientas de un pipeline de genómica estándar —I/O 
 
 ```
 Genoly-GPU/
+├── .github/
+│   └── workflows/ci.yml       # CI: ruff + pytest en 3.10 y 3.12
+├── pyproject.toml             # Paquete (pip install .), pytest y ruff
+├── setup.py                   # Shim para pip/setuptools antiguos
+├── requirements.txt           # Mismas dependencias que pyproject.toml
 ├── Genoly/
 │   ├── __init__.py
 │   ├── core/
 │   │   ├── device.py             # DeviceManager: detección y gestión de GPU/CUDA
 │   │   ├── gpu_setup.py          # Auto-detección nvidia-smi e instalación de PyTorch CUDA
-│   │   └── vram.py               # VRAMManager: micro-batching adaptativo y VRAM dinámica
+│   │   └── vram.py               # VRAMManager: micro-batching, VRAM dinámica y reintentos OOM
 │   ├── io/
 │   │   ├── fasta.py              # FASTA por bloques de disco, lotes de RAM y ventanas
-│   │   └── fastq.py              # Lectura/escritura FASTQ con calidad Phred
+│   │   ├── fastq.py              # Lectura/escritura FASTQ con calidad Phred
+│   │   └── sam.py                # Escritura SAM/BAM y parser de alineaciones
 │   ├── encoding/
 │   │   └── encoder.py            # Codificación a tensores enteros y one-hot (+ encode_stream)
 │   ├── qc/
@@ -49,17 +55,27 @@ Genoly-GPU/
 │   ├── kmer/
 │   │   └── kmers.py              # Conteo de k-mers en GPU (+ streaming count_stream/count_fasta)
 │   ├── variants/
-│   │   └── caller.py             # Pileup y llamada de variantes en GPU
-│   ├── quantitative/
-│   │   ├── lmm.py                # LinearMixedModel: fachada LMM (REML/ML + BLUP)
-│   │   ├── grm.py                # Matriz de parentesco genómica (VanRaden, GCTA)
-│   │   ├── reml.py               # Estimación REML/ML por puntuación de Fisher
-│   │   ├── gblup.py              # GenomicBLUP con fiabilidad y precisión
-│   │   ├── preprocess.py         # Carga CSV/Excel con limpieza e imputación
-│   │   └── utils.py              # Validación de datos y Cholesky regularizada
-│   └── alignment/
-│       ├── alignment.py          # Clase principal GPUSequenceAligner
-│       └── alignment_wExa.py     # Versión con analizador de mutaciones simplificado
+│   │   ├── caller.py             # Pileup y llamada de variantes en GPU
+│   │   └── vcf.py                # Escritura VCF (SNV y deleciones ancladas con END)
+│   ├── alignment/
+│   │   ├── alignment.py          # GPUSequenceAligner (fallback a parasail cuando no hay GPU)
+│   │   └── mapper.py             # Seed-and-extend: lecturas → SAM
+│   ├── annotation/
+│   │   └── annotator.py          # Anotación funcional GFF / Gene Ontology
+│   ├── downstream/
+│   │   └── reduction.py          # PCA, KMeans y t-SNE sobre tensores GPU
+│   ├── report/
+│   │   └── plots.py              # SVG de heatmap, volcano e informes Markdown
+│   └── quantitative/
+│       ├── lmm.py                # LinearMixedModel: fachada LMM (REML/ML + BLUP)
+│       ├── gblup.py              # GenomicBLUP con fiabilidad y precisión
+│       ├── gwas.py               # Asociación GWAS
+│       ├── grm.py                # Matriz de parentesco genómica (VanRaden, GCTA)
+│       ├── reml.py               # Estimación REML/ML por puntuación de Fisher
+│       ├── preprocess.py         # Carga CSV/Excel con limpieza e imputación
+│       ├── crossval.py           # Validación cruzada
+│       ├── popgen.py             # MAF / HWE y estadísticas de poblaciones
+│       └── utils.py              # Validación de datos y Cholesky regularizada
 ├── docker/                         # Despliegue en contenedor (API + frontend con CUDA)
 │   ├── Dockerfile                # Multi-stage: frontend Node + backend CPU/GPU condicional
 │   ├── docker-compose.yml        # Servicios genoly-cpu / genoly-gpu / gpu-select
@@ -76,14 +92,29 @@ Genoly-GPU/
 │   ├── analisis2.py              # Sitios de restricción y motivos consenso
 │   └── seqdump.txt               # Isoformas del gen BRCA1 (ejemplo)
 ├── tests/
-│   ├── test_smoke.py             # Tests de humo de todos los módulos
-│   └── test_streaming.py         # Tests del pipeline de streaming (RAM/VRAM acotadas)
+│   ├── test_smoke.py             # Humo: todos los módulos (dispositivo, I/O, QC, k-mers, LMM...)
+│   ├── test_streaming.py         # Streaming RAM/VRAM acotadas y equivalencia con fuerza bruta
+│   ├── test_fastq_pipeline.py    # Lectura FASTQ + jobs aislados de QC/procesado
+│   ├── test_mapper.py            # Alineamiento seed-and-extend y su job
+│   ├── test_variant_pipeline.py  # SAM -> variantes -> VCF y su job
+│   ├── test_downstream.py        # PCA / KMeans / t-SNE y su job
+│   ├── test_annotation_report.py # GFF/GO, SVG de heatmap y volcano, jobs de anotación/informe
+│   ├── test_quantgen_extra.py    # Validación cruzada, GWAS, GRM, MAF/HWE
+│   ├── test_api.py               # API REST: auth, límites de subida, LFI, SSE
+│   ├── test_worker.py            # Aislamiento de procesos y limpieza de spills huérfanos
+│   └── conftest.py               # sys.path de la raíz (una sola vez)
 ├── ui/
 │   ├── backend/                  # API REST FastAPI
-│   │   ├── main.py
-│   │   ├── jobs.py               # Trabajos de fondo con progreso en tiempo real
-│   │   ├── uploads.py            # Gestión de archivos subidos
-│   │   └── routers/              # device, qc, kmer, variants, quantitative, gblup, upload, jobs
+│   │   ├── main.py               # App, CORS, autenticación por API key, limpieza periódica
+│   │   ├── jobs.py               # Cola de trabajos con progreso SSE multi-suscriptor
+│   │   ├── worker.py             # Proceso hijo aislado (OOM/segfault no tumban la API)
+│   │   ├── uploads.py            # Registro de subidas
+│   │   ├── datasets.py           # Registro de datasets y extracción ZIP
+│   │   ├── security.py           # API key, CORS y directorios de datos permitidos
+│   │   ├── registry.py           # Registro JSON con candado entre procesos
+│   │   ├── maintenance.py        # Límites de tamaño y caducidad (TTL) de archivos
+│   │   └── routers/              # device, qc, kmer, variants, map, downstream, annotation,
+│   │                             # report, quantitative, gblup, qdata, dataset, upload, jobs
 │   └── frontend/                 # UI React + Vite + Tailwind
 │       └── src/                  # páginas y componentes
 ├── fetchingfasta.py              # Descarga de FASTA desde NCBI por accession
@@ -104,9 +135,15 @@ Genoly-GPU incluye una interfaz web moderna construida con **React + Vite + Tail
 |---|---|
 | `/` | Dashboard con estado del dispositivo y accesos. |
 | `/device` | Detección de GPU NVIDIA (nvidia-smi), driver, CUDA y build de PyTorch recomendada. |
-| `/qc` | Control de calidad: GC content, composición y calidad Phred. |
+| `/qc` | Control de calidad FASTA: GC content, composición y calidad Phred. |
+| `/fastq` | Control de calidad y filtrado de lecturas cortas (FASTQ). |
 | `/kmer` | Conteo de k-mers, espectro y estimación de tamaño de genoma. |
-| `/variants` | Pileup y llamada de variantes (SNV/deleciones). |
+| `/map` | Alineamiento de lecturas (seed-and-extend) y exportación SAM. |
+| `/variants` | Pileup y llamada de variantes (SNV/deleciones) y exportación VCF. |
+| `/downstream` | PCA, clustering (KMeans) y t-SNE de datos genómicos. |
+| `/annotation` | Anotación funcional a partir de GFF y Gene Ontology. |
+| `/report` | Informes con heatmap y volcano (SVG/Markdown). |
+| `/datos` | Gestión de datasets (subida de FASTA/ZIP y registro de rutas). |
 | `/quantitative` | Genética cuantitativa: LMM (REML/ML) y valores de cría BLUP. |
 | `/gblup` | Predicción genómica GBLUP con fiabilidad y precisión por individuo. |
 
@@ -287,6 +324,26 @@ npm run build      # genera ui/frontend/dist
 > [!TIP]
 > Durante desarrollo, Vite redirige `/api/*` a `http://127.0.0.1:8000` automáticamente, así que no necesitas configurar CORS manualmente.
 
+## Variables de entorno
+
+La API del backend (`ui/backend`) y el pipeline se configuran por variables de entorno:
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `GENOLY_API_KEY` | *(vacía)* | Si se define, **toda ruta `/api/*` exige la clave**. Se acepta en la cabecera `X-API-Key`, en `Authorization: Bearer` y en `?api_key=` (este último lo usan `EventSource` y los enlaces de descarga, que no pueden mandar cabeceras). `/api/health` queda siempre pública porque el HEALTHCHECK de Docker no envía cabeceras. Vacía = modo local abierto (se registra un aviso al arrancar). |
+| `GENOLY_CORS_ORIGINS` | orígenes de Vite (`localhost:5173`, `4173`) | Orígenes permitidos en CORS, separados por comas. En producción el frontend se sirve desde el propio FastAPI (mismo origen) y no hace falta CORS. |
+| `GENOLY_ALLOWED_DATA_DIRS` | raíz del proyecto | Directorios desde los que se pueden registrar rutas de datos del servidor (`/api/upload/register` y `/api/dataset/register`). Fuera de ahí se responde 403. Hay además una lista negra de rutas sensibles (`/etc`, `/proc`, `~/.ssh`, `.env`, `id_rsa`, credenciales, ...) que se bloquea **siempre**, aunque esté dentro del allowlist. |
+| `GENOLY_MAX_UPLOAD_BYTES` | `53687091200` (50 GiB) | Tamaño máximo por archivo, tanto en la carga multipart como en la carga por partes (tamaño declarado, offset y total). `0` = sin límite. |
+| `GENOLY_UPLOAD_TTL_HOURS` | `168` (7 días) | Caducidad de las subidas gestionadas y de las extracciones de datasets; se borran junto con su entrada de registro. Los archivos **registrados** por el usuario nunca se tocan. `0` desactiva la limpieza. |
+| `GENOLY_UPLOAD_DIR` | temporal del sistema | Directorio de subidas. Para archivos de decenas de GB apúntalo a un disco real (p. ej. `/var/tmp/genoly/uploads`). |
+| `GENOLY_DATASET_DIR` | temporal del sistema | Directorio de datasets y de sus extracciones. |
+| `GENOLY_SPILL_DIR` | temporal del sistema | Directorio de derrame del conteo de k-mers (un genoma completo puede ocupar decenas de GB). |
+| `GENOLY_CLEANUP_INTERVAL` | `600` | Segundos entre pasadas de limpieza (spills huérfanos + TTL). |
+| `GENOLY_DEVICE` | auto-detección | `cpu`, `cuda` o vacío. Pedir `cuda` sin CUDA disponible falla al arrancar con un mensaje claro. |
+| `GENOLY_PORT` | `8000` | Puerto del servidor. En `docker/docker-compose.yml` cada perfil tiene el suyo: `GENOLY_GPU_PORT` (8001) y `GENOLY_GPU_SELECT_PORT` (8002). |
+
+En Docker, todas ellas se pueden fijar en el bloque `environment:` de `docker/docker-compose.yml` o en un fichero `.env` junto al compose.
+
 ## Requisitos
 
 - Python 3.8 o superior.
@@ -294,11 +351,17 @@ npm run build      # genera ui/frontend/dist
 - NVIDIA GPU con drivers CUDA (recomendado, no obligatorio).
 - Dependencias:
 
-| Paquete | Mínimo |
-|---|---|
-| torch | >= 2.0.0 |
-| numpy | >= 1.20.0 |
-| openpyxl | >= 3.1 |
+| Paquete | Mínimo | Notas |
+|---|---|---|
+| torch | >= 2.0.0 | imprescindible |
+| numpy | >= 1.20.0 | imprescindible |
+| openpyxl | >= 3.1 | solo para leer Excel |
+| scipy | >= 1.7 | GWAS (`Genoly.quantitative.gwas`) |
+| pysam | >= 0.21 | lectura BAM/CRAM (opcional en código) |
+| parasail | >= 1.3 | SIMD en Smith-Waterman (opcional en código) |
+| biopython | >= 1.80 | ejemplos y anotación |
+| matplotlib | >= 3.5 | gráficos del informe |
+| requests | >= 2.25 | descarga de secuencias |
 
 > [!NOTE]
 > `openpyxl` solo se necesita para leer archivos de Excel (`.xlsx`/`.xls`) con el módulo de preprocesamiento; los CSV funcionan sin él.
@@ -493,7 +556,7 @@ docker compose -f docker/docker-compose.yml ps
 
 # Healthcheck
 curl http://localhost:8000/api/health
-# {"status":"ok","version":"0.1.0"}
+# {"status":"ok","version":"0.2.0"}
 
 # Detección de GPU
 curl http://localhost:8000/api/device
@@ -656,18 +719,37 @@ python examples/analisis2.py
 python fetchingfasta.py
 ```
 
-> [!WARNING]
-> Los ejemplos `analisis1.py` y `analisis2.py` leen archivos locales (`seqdump.txt` y `ejemplo.fasta`). Asegúrate de que dichos archivos existan en el directorio de trabajo antes de ejecutarlos.
+> [!NOTE]
+> Los ejemplos `analisis1.py` y `analisis2.py` leen `examples/seqdump.txt` y `examples/ejemplo.fasta`, incluidos en el repositorio. Resuelven la ruta junto al propio script, así que funcionan desde cualquier directorio de trabajo.
 
 ## Tests
 
 ```bash
-python tests/test_smoke.py
-# o con pytest
 python -m pytest tests -v
+# o un fichero suelto
+python tests/test_smoke.py
+# lint (también se ejecuta en CI)
+ruff check .
 ```
 
-Los tests de `tests/test_streaming.py` verifican la equivalencia exacta entre el pipeline de streaming y el conteo en memoria, la matemática del planificador de VRAM y el ventanado con solape `k-1`.
+`pytest`, `ruff` y `httpx` (necesario para los tests de la API) vienen en el extra de desarrollo: `pip install -e ".[dev]"`. El CI (`.github/workflows/ci.yml`) ejecuta `ruff check .` y `python -m pytest tests -q` en Python 3.10 y 3.12.
+
+Hay 161 tests (más 39 subtests) repartidos en 10 ficheros:
+
+| Fichero | Qué cubre |
+|---|---|
+| `test_smoke.py` | dispositivo, I/O FASTA/FASTQ, codificación, QC, k-mers, `gpu_setup`, caller, LMM/GBLUP/kinship, preprocesamiento, alineador, registro de datasets |
+| `test_streaming.py` | `FastaReader` por bloques, `VRAMManager`, `encode_stream`, conteo en streaming vs fuerza bruta |
+| `test_fastq_pipeline.py` | `FastqReader`, QC en streaming, jobs aislados de FASTQ |
+| `test_mapper.py` | `ReadMapper` (seed-and-extend) y su job |
+| `test_variant_pipeline.py` | SAM → variantes → VCF y su job |
+| `test_downstream.py` | PCA / KMeans / t-SNE y su job |
+| `test_annotation_report.py` | GFF/GO, SVG de heatmap y volcano, jobs de anotación e informe |
+| `test_quantgen_extra.py` | validación cruzada, GWAS, GRM, MAF/HWE |
+| `test_api.py` | auth `X-API-Key`/`Bearer`/`?api_key=` y `/api/health` pública, 401 en toda la superficie, límites de subida (413/409), registro de rutas (allowlist y LFI) y stream SSE de jobs |
+| `test_worker.py` | aislamiento de procesos (raise / segfault / `os._exit`) y spills huérfanos |
+
+`test_streaming.py` verifica la equivalencia exacta entre el pipeline de streaming y el conteo en memoria, la matemática del planificador de VRAM y el ventanado con solape `k-1`.
 
 ## Clases principales
 
@@ -912,8 +994,8 @@ python descargar_datos_test.py
 - [x] Montaje automático y robusto del contenedor Docker con GPU y verificación de CUDA (setup_docker.sh / setup_docker.ps1).
 - [ ] Soporte real de paralelización por lotes en GPU para el alineador.
 - [ ] Llamada de inserciones mediante CIGAR (lecturas alineadas).
-- [ ] Exportación a formatos estándar (SAM/BAM, VCF).
-- [ ] Anotación funcional de variantes (efecto sobre proteínas, dominios conservados).
+- [x] Exportación a formatos estándar (SAM/BAM, VCF).
+- [x] Anotación funcional con GFF/GO sobre regiones del genoma.
 
 ## Licencia
 

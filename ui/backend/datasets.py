@@ -9,15 +9,19 @@ plano, de modo que todos los ensamblajes puedan analizarse en un solo
 flujo (QC y k-mers combinados).
 
 Los datasets se guardan en un registro JSON persistente (patrón idéntico
-al de ``uploads.py``). Los .zip se extraen a disco (nunca se cargan en
-RAM) en ``GENOLY_DATASET_DIR/extract/<id>`` con guarda contra zip-slip.
+al de ``uploads.py``, con candado **entre procesos**: el proceso
+trabajador escribe el mismo fichero, ver :mod:`ui.backend.registry`). Los
+.zip se extraen a disco (nunca se cargan en RAM) en
+``GENOLY_DATASET_DIR/extract/<id>`` con guarda contra zip-slip. Las rutas
+registradas deben caer dentro de los directorios de datos permitidos
+(:mod:`ui.backend.security`).
 """
 
-import json
 import os
 import re
 import shutil
 import threading
+import time
 import zipfile
 from pathlib import Path
 from tempfile import gettempdir
@@ -26,6 +30,8 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from Genoly.io.fasta import FastaReader
+from ui.backend.registry import JsonRegistry
+from ui.backend.security import check_data_path
 
 #: Extensiones de archivos FASTA soportados en el descubrimiento.
 FASTA_SUFFIXES = (".fna", ".fasta", ".fa", ".faa", ".ffn")
@@ -41,29 +47,8 @@ _REGISTRY_PATH = _DATASETS_DIR / "registry.json"
 
 _DATASET_RE = re.compile(r"^[0-9a-f]{32}$")
 
-_ALLOWED_DATA_DIRS = [
-    Path(p).expanduser().resolve()
-    for p in os.environ.get("GENOLY_ALLOWED_DATA_DIRS", "").split(",")
-    if p.strip()
-]
-
-_lock = threading.Lock()
-
-
-def _load_registry() -> dict:
-    if not _REGISTRY_PATH.is_file():
-        return {}
-    try:
-        return json.loads(_REGISTRY_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_registry(data: dict) -> None:
-    tmp = _REGISTRY_PATH.with_name(_REGISTRY_PATH.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    tmp.replace(_REGISTRY_PATH)
+#: Registro compartido con los procesos trabajadores (candado inter-proceso).
+_registry = JsonRegistry(_REGISTRY_PATH)
 
 
 def get_dataset(dataset_id: str) -> Optional[dict]:
@@ -71,23 +56,12 @@ def get_dataset(dataset_id: str) -> Optional[dict]:
     if not _DATASET_RE.match(dataset_id or ""):
         raise HTTPException(status_code=400,
                             detail="Identificador de dataset inválido")
-    with _lock:
-        return _load_registry().get(dataset_id)
+    return _registry.get(dataset_id)
 
 
 def _validate_source(src: Path) -> Path:
     """Valida que la fuente exista y respete el allowlist de datos."""
-    src = src.expanduser().resolve()
-    if not src.exists():
-        raise HTTPException(status_code=400,
-                            detail="La ruta no existe")
-    if _ALLOWED_DATA_DIRS:
-        if not any(src.is_relative_to(base) for base in _ALLOWED_DATA_DIRS):
-            raise HTTPException(
-                status_code=403,
-                detail="La ruta está fuera de los directorios de datos "
-                       "permitidos (GENOLY_ALLOWED_DATA_DIRS)")
-    return src
+    return check_data_path(src, extra=(_DATASETS_DIR,))
 
 
 def discover_fastas(path) -> List[Path]:
@@ -133,6 +107,7 @@ def _file_meta(path: Path) -> dict:
         "path": str(path),
         "filename": path.name,
         "size": int(path.stat().st_size),
+        "created_at": time.time(),
         "stats_status": "pending",   # pending | ready | error
         "records": None,
         "total_bases": None,
@@ -184,10 +159,7 @@ def register_dataset(source: str) -> dict:
         "status": "pending",   # pending | ready | error
         "error": None,
     }
-    with _lock:
-        data = _load_registry()
-        data[dataset_id] = meta
-        _save_registry(data)
+    _registry.set(dataset_id, meta)
 
     threading.Thread(target=_scan_dataset, args=(dataset_id,),
                      daemon=True).start()
@@ -219,10 +191,8 @@ def _scan_dataset(dataset_id: str) -> None:
 def _set_file_stats(dataset_id: str, index: int, records: int,
                     total_bases: int, first: Optional[dict],
                     *, error: Optional[str] = None) -> None:
-    with _lock:
-        data = _load_registry()
-        meta = data.get(dataset_id)
-        if meta is None or index >= len(meta["files"]):
+    def _apply(meta: dict) -> None:
+        if index >= len(meta["files"]):
             return
         finfo = meta["files"][index]
         finfo["records"] = records
@@ -234,4 +204,15 @@ def _set_file_stats(dataset_id: str, index: int, records: int,
             f["stats_status"] == "error" for f in meta["files"]) else (
             "ready" if all(f["stats_status"] != "pending"
                            for f in meta["files"]) else "pending")
-        _save_registry(data)
+
+    _registry.update_entry(dataset_id, _apply)
+
+
+def all_datasets() -> dict:
+    """Copia del registro completo de datasets (para mantenimiento)."""
+    return dict(_registry.locked_read())
+
+
+def delete_dataset(dataset_id: str) -> None:
+    """Elimina la entrada de un dataset del registro."""
+    _registry.update(lambda data: data.pop(dataset_id, None))

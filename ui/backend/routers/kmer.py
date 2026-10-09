@@ -14,13 +14,13 @@ lotes de RAM -> micro-lotes adaptativos de GPU según la VRAM libre
 tamaño del archivo.
 """
 
+from typing import List, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
 
 from Genoly.io.fasta import FastaReader
 from Genoly.kmer.kmers import KmerCounter
-
 from ui.backend import jobs
 from ui.backend.datasets import get_dataset
 from ui.backend.uploads import get_upload, upload_path

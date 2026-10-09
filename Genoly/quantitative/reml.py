@@ -64,7 +64,6 @@ def solve_variance_components(y_t: torch.Tensor,
 
     n = y_t.shape[0]
     p = X_t.shape[1]
-    q = K_t.shape[0]
 
     eye_n = torch.eye(n, dtype=y_t.dtype, device=y_t.device)
     W = Z_t @ K_t @ Z_t.T

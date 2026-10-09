@@ -58,12 +58,17 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import logging
 import sys
-from typing import Dict, Iterator, List, Sequence
+from typing import Callable, Dict, Iterator, List, Sequence, TypeVar
 
 import torch
 
 from Genoly.core.device import DeviceManager
+
+logger = logging.getLogger("genoly.vram")
+
+T = TypeVar("T")
 
 #: Fracción de la memoria libre que se puede usar como presupuesto de
 #: micro-lote. 0.25 deja margen para el driver, otros procesos y los
@@ -83,6 +88,76 @@ DEFAULT_MAX_ITEMS = 65_536
 WINDOW_TARGET_BYTES = 128 * 1024 * 1024  # 128 MiB
 WINDOW_MIN_BASES = 65_536                # 64 kpb
 WINDOW_MAX_BASES = 8 * 1024 * 1024       # 8 Mpb
+
+#: Mínimo al que puede reducirse la fracción de seguridad tras un OOM.
+MIN_SAFETY_FRACTION = 0.01
+
+#: Mínimo al que puede reducirse el suelo del presupuesto (1 MiB).
+MIN_BUDGET_FLOOR_BYTES = 1024 * 1024
+
+
+def is_cuda_oom(exc: BaseException) -> bool:
+    """
+    True si ``exc`` es un agotamiento de memoria de CUDA (o de su caché).
+
+    Cubre ``torch.cuda.OutOfMemoryError`` (PyTorch >= 1.13), el
+    ``torch.OutOfMemoryError`` global (>= 2) y el ``RuntimeError`` con el
+    mensaje clásico del alocador, para que el reintento funcione también
+    con builds antiguos.
+    """
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    oom_type = getattr(torch, "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    if isinstance(exc, MemoryError):
+        return True
+    return (isinstance(exc, RuntimeError)
+            and "out of memory" in str(exc).lower())
+
+
+def retry_on_oom(fn: Callable[[], T], *,
+                 manager: "VRAMManager | None" = None,
+                 attempts: int = 3,
+                 shrink: float = 0.5) -> T:
+    """
+    Ejecuta ``fn()`` y, si revienta por falta de memoria de GPU, libera
+    memoria, reduce el presupuesto del ``VRAMManager`` y reintenta.
+
+    El suelo de la VRAM libre puede ser menor que el presupuesto mínimo
+    (otro proceso puede estar usando la GPU), así que sin este reintento
+    el lote primero falla siempre y el trabajo muere sin llegarse a
+    procesar. Si se agotan los intentos se relanza la última excepción.
+
+    Args:
+        fn: Operación que puede agotar la VRAM (sin argumentos).
+        manager: Gestor cuyo presupuesto se reduce en cada reintento.
+        attempts: Intentos totales (>= 1).
+        shrink: Factor por el que se reduce el presupuesto en cada fallo.
+
+    Returns:
+        El valor devuelto por ``fn()``.
+    """
+    if attempts < 1:
+        raise ValueError("attempts debe ser >= 1")
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:
+            last = attempt + 1 >= attempts
+            if last or not is_cuda_oom(exc):
+                raise
+            logger.warning(
+                "CUDA sin memoria (intento %d/%d); se libera caché y se "
+                "reduce el presupuesto ×%s", attempt + 1, attempts, shrink)
+            if manager is not None:
+                manager.shrink(shrink)
+                manager.release()
+            else:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+    raise AssertionError("inalcanzable")  # pragma: no cover
 
 
 def _system_free_bytes() -> int:
@@ -275,11 +350,14 @@ class VRAMManager:
         if bytes_per_base < 1:
             raise ValueError("bytes_per_base debe ser >= 1")
 
-        budget = self.budget_bytes()
         group: List[int] = []
         max_len = 0
 
         for i, length in enumerate(lengths):
+            # Se recalcula en cada paso: si un micro-lote revienta por OOM,
+            # el consumidor llama a shrink() y los siguientes grupos salen
+            # ya con el presupuesto reducido (budget_bytes se lee aquí).
+            budget = self.budget_bytes()
             candidate_max = max_len if length <= max_len else length
             candidate_bytes = (len(group) + 1) * candidate_max * bytes_per_base
             if group and (candidate_bytes > budget
@@ -321,6 +399,23 @@ class VRAMManager:
         """
         gc.collect()
         self.manager.empty_cache()
+
+    def shrink(self, factor: float = 0.5) -> None:
+        """
+        Reduce el presupuesto tras un OOM para el siguiente micro-lote.
+
+        Multiplica ``safety_fraction`` y ``min_budget_bytes`` por
+        ``factor``, con suelo en :data:`MIN_SAFETY_FRACTION` /
+        :data:`MIN_BUDGET_FLOOR_BYTES` para que el presupuesto nunca
+        colapse a cero (``plan_micro_batches`` lo exige >= 1).
+        """
+        if not 0.0 < factor < 1.0:
+            raise ValueError("factor debe estar en (0, 1)")
+        self.safety_fraction = max(MIN_SAFETY_FRACTION,
+                                   self.safety_fraction * factor)
+        self.min_budget_bytes = max(
+            MIN_BUDGET_FLOOR_BYTES,
+            int(self.min_budget_bytes * factor))
 
     def stats(self) -> Dict[str, object]:
         """Instantánea del estado de memoria (para telemetría/logs)."""

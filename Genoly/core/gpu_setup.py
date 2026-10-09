@@ -1,5 +1,13 @@
-import os
+"""
+Detección de la GPU NVIDIA e instalación de la build de PyTorch con CUDA.
+
+Uso desde la línea de comandos:
+
+    python -m Genoly.core.gpu_setup [--install] [--dry-run] [--tag cuXXX]
+"""
+
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -23,6 +31,9 @@ PYTORCH_CUDA_BUILDS: List[Tuple[str, float]] = [
 ]
 
 INDEX_URL = "https://download.pytorch.org/whl/{tag}"
+
+#: Etiqueta CUDA válida: 'cu' seguido de exactamente tres dígitos.
+CUDA_TAG_RE = re.compile(r"^cu\d{3}$")
 
 
 @dataclass
@@ -157,22 +168,69 @@ class GpuSetup:
     # Comandos de instalación
     # ---------------------------------------------------------------------- #
     @staticmethod
-    def install_command(cuda_tag: str, include_torchvision: bool = True) -> str:
+    def validate_cuda_tag(cuda_tag: str) -> str:
         """
-        Genera el comando pip para instalar PyTorch con la build CUDA dada.
+        Comprueba que la etiqueta CUDA tenga la forma ``cuXXX``.
+
+        La etiqueta se interpola en la URL del índice de pip y viaja hasta
+        el proceso hijo, así que se valida antes de construir la lista de
+        argumentos (nunca se pasa por un shell).
+
+        Args:
+            cuda_tag: Etiqueta candidata, p. ej. 'cu126'.
+
+        Returns:
+            La etiqueta validada.
+
+        Raises:
+            ValueError: Si no cumple ``cu\\d{3}``.
+        """
+        if not isinstance(cuda_tag, str) or not CUDA_TAG_RE.match(cuda_tag):
+            raise ValueError(
+                f"Etiqueta CUDA inválida: {cuda_tag!r} "
+                "(se espera 'cu' + 3 dígitos, p. ej. 'cu126')")
+        return cuda_tag
+
+    @classmethod
+    def install_argv(cls, cuda_tag: str,
+                     include_torchvision: bool = True) -> List[str]:
+        """
+        Argumentos (sin shell) para instalar PyTorch con la build CUDA dada.
 
         Args:
             cuda_tag: Etiqueta CUDA, por ejemplo 'cu126'.
             include_torchvision: Incluir torchvision en la instalación.
 
         Returns:
-            Comando pip listo para ejecutar.
+            Lista de argumentos lista para ``subprocess.run``.
         """
-        packages = "torch"
-        if include_torchvision:
-            packages += " torchvision"
-        index = INDEX_URL.format(tag=cuda_tag)
-        return f"{sys.executable} -m pip install {packages} --index-url {index}"
+        cls.validate_cuda_tag(cuda_tag)
+        packages = ["torch"] + (["torchvision"] if include_torchvision else [])
+        return [sys.executable, "-m", "pip", "install", *packages,
+                "--index-url", INDEX_URL.format(tag=cuda_tag)]
+
+    @classmethod
+    def install_command(cls, cuda_tag: str,
+                        include_torchvision: bool = True) -> str:
+        """
+        Comando pip (solo para mostrar) de la instalación con CUDA dada.
+
+        Args:
+            cuda_tag: Etiqueta CUDA, por ejemplo 'cu126'.
+            include_torchvision: Incluir torchvision en la instalación.
+
+        Returns:
+            Comando pip listo para copiar y pegar.
+        """
+        return shlex.join(cls.install_argv(cuda_tag, include_torchvision))
+
+    @classmethod
+    def install_hint(cls, cuda_tag: Optional[str]) -> str:
+        """Mensaje con el comando de instalación (o un aviso si no hay tag)."""
+        if not cuda_tag:
+            return ("No se pudo determinar la build de CUDA recomendada; "
+                    "instala a mano con --tag cuXXX.")
+        return cls.install_command(cuda_tag)
 
     @classmethod
     def install_cuda_torch(cls, cuda_tag: Optional[str] = None,
@@ -212,7 +270,11 @@ class GpuSetup:
             return 0
 
         print("\nInstalando PyTorch con CUDA...")
-        code = os.system(command)
+        # Nunca por shell: los argumentos van como lista, y el tag ya está
+        # validado por install_argv.
+        code = subprocess.run(
+            cls.install_argv(tag, include_torchvision)
+        ).returncode
         if code == 0:
             print("Instalación completada.")
         else:
@@ -264,7 +326,7 @@ class GpuSetup:
             print(f"PyTorch: {status.get('reason')}")
             if auto_install and not dry_run and tag:
                 return cls.install_cuda_torch(tag, dry_run=False)
-            print(f"\nInstala PyTorch con:\n  {cls.install_command(tag)}")
+            print(f"\nInstala PyTorch con:\n  {cls.install_hint(tag)}")
             return 1
 
         print(f"PyTorch: {status['version']} | "
@@ -285,7 +347,7 @@ class GpuSetup:
             return cls.install_cuda_torch(tag, dry_run=False)
 
         print(f"\nPara activar la GPU, reinstala PyTorch con:\n  "
-              f"{cls.install_command(tag)}")
+              f"{cls.install_hint(tag)}")
         return 1
 
 
@@ -308,12 +370,22 @@ def main() -> int:
         idx = args.index("--tag")
         if idx + 1 < len(args):
             tag = args[idx + 1]
+        if tag is not None:
+            try:
+                GpuSetup.validate_cuda_tag(tag)
+            except ValueError as exc:
+                print(f"Error: {exc}")
+                return 2
 
-    if "--install" in args:
-        return GpuSetup.install_cuda_torch(tag, dry_run="--dry-run" in args)
+    try:
+        if "--install" in args:
+            return GpuSetup.install_cuda_torch(tag, dry_run="--dry-run" in args)
 
-    return GpuSetup.ensure_cuda_torch(auto_install="--auto" in args,
-                                      dry_run="--dry-run" in args)
+        return GpuSetup.ensure_cuda_torch(auto_install="--auto" in args,
+                                          dry_run="--dry-run" in args)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 2
 
 
 if __name__ == "__main__":

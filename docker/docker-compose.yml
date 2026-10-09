@@ -1,6 +1,19 @@
+# Fragmento compartido (anchor YAML). El healthcheck estaba duplicado en
+# los 3 servicios; las claves x-* en la raíz las ignora docker compose.
+x-healthcheck: &healthcheck
+  test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"GENOLY_PORT\"]}/api/health')"]
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+
 services:
   # ================================================================
   # Servicio BASE (CPU por defecto, sin GPU)
+  #
+  # Las variables siguientes controlan la API (ver "Variables de
+  # entorno" en README.md); dejarlas vacías mantiene el modo local sin
+  # clave de API.
   # ================================================================
   genoly-cpu:
     build:
@@ -16,17 +29,18 @@ services:
     environment:
       - GENOLY_DEVICE=cpu
       - GENOLY_PORT=${GENOLY_PORT:-8000}
+      - GENOLY_API_KEY=${GENOLY_API_KEY:-}
+      - GENOLY_CORS_ORIGINS=${GENOLY_CORS_ORIGINS:-}
+      - GENOLY_ALLOWED_DATA_DIRS=${GENOLY_ALLOWED_DATA_DIRS:-}
+      - GENOLY_MAX_UPLOAD_BYTES=${GENOLY_MAX_UPLOAD_BYTES:-53687091200}
+      - GENOLY_UPLOAD_TTL_HOURS=${GENOLY_UPLOAD_TTL_HOURS:-168}
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"GENOLY_PORT\"]}/api/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+    healthcheck: *healthcheck
 
   # ================================================================
   # Perfil GPU (se activa con --profile gpu)
-  # Detecta automáticamente todas las GPUs disponibles
+  # Detecta automáticamente todas las GPUs disponibles.
+  # Puerto por defecto 8001: así los perfiles pueden convivir.
   # ================================================================
   genoly-gpu:
     build:
@@ -34,14 +48,19 @@ services:
       dockerfile: docker/Dockerfile
       args:
         - GENOLY_GPU_MODE=gpu
-        - GENOLY_PORT=${GENOLY_PORT:-8000}
+        - GENOLY_PORT=${GENOLY_GPU_PORT:-8001}
     image: genoly-gpu:gpu-${GENOLY_TAG:-latest}
     container_name: genoly-gpu-gpu
     ports:
-      - "${GENOLY_PORT:-8000}:${GENOLY_PORT:-8000}"
+      - "${GENOLY_GPU_PORT:-8001}:${GENOLY_GPU_PORT:-8001}"
     environment:
       - GENOLY_DEVICE=cuda
-      - GENOLY_PORT=${GENOLY_PORT:-8000}
+      - GENOLY_PORT=${GENOLY_GPU_PORT:-8001}
+      - GENOLY_API_KEY=${GENOLY_API_KEY:-}
+      - GENOLY_CORS_ORIGINS=${GENOLY_CORS_ORIGINS:-}
+      - GENOLY_ALLOWED_DATA_DIRS=${GENOLY_ALLOWED_DATA_DIRS:-}
+      - GENOLY_MAX_UPLOAD_BYTES=${GENOLY_MAX_UPLOAD_BYTES:-53687091200}
+      - GENOLY_UPLOAD_TTL_HOURS=${GENOLY_UPLOAD_TTL_HOURS:-168}
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
@@ -53,16 +72,12 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"GENOLY_PORT\"]}/api/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+    healthcheck: *healthcheck
 
   # ================================================================
   # Perfil GPU SELECT (para elegir GPU específica)
   # Uso: GPU_ID=1 docker compose --profile gpu-select up -d
+  # Puerto por defecto 8002.
   # ================================================================
   genoly-gpu-selected:
     build:
@@ -70,14 +85,19 @@ services:
       dockerfile: docker/Dockerfile
       args:
         - GENOLY_GPU_MODE=gpu
-        - GENOLY_PORT=${GENOLY_PORT:-8000}
+        - GENOLY_PORT=${GENOLY_GPU_SELECT_PORT:-8002}
     image: genoly-gpu:gpu-${GENOLY_TAG:-latest}
     container_name: genoly-gpu-gpu-${GPU_ID:-0}
     ports:
-      - "${GENOLY_PORT:-8000}:${GENOLY_PORT:-8000}"
+      - "${GENOLY_GPU_SELECT_PORT:-8002}:${GENOLY_GPU_SELECT_PORT:-8002}"
     environment:
       - GENOLY_DEVICE=cuda
-      - GENOLY_PORT=${GENOLY_PORT:-8000}
+      - GENOLY_PORT=${GENOLY_GPU_SELECT_PORT:-8002}
+      - GENOLY_API_KEY=${GENOLY_API_KEY:-}
+      - GENOLY_CORS_ORIGINS=${GENOLY_CORS_ORIGINS:-}
+      - GENOLY_ALLOWED_DATA_DIRS=${GENOLY_ALLOWED_DATA_DIRS:-}
+      - GENOLY_MAX_UPLOAD_BYTES=${GENOLY_MAX_UPLOAD_BYTES:-53687091200}
+      - GENOLY_UPLOAD_TTL_HOURS=${GENOLY_UPLOAD_TTL_HOURS:-168}
       - CUDA_VISIBLE_DEVICES=${GPU_ID:-0}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     restart: unless-stopped
@@ -89,9 +109,4 @@ services:
             - driver: nvidia
               device_ids: ["${GPU_ID:-0}"]
               capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"GENOLY_PORT\"]}/api/health')"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+    healthcheck: *healthcheck

@@ -1,9 +1,15 @@
+# Nota: Docker solo lee el .dockerignore de la RAIZ del build context
+# (docker-compose usa `context: ..`), por eso este fichero es el único
+# efectivo. docker/.dockerignore se mantiene sincronizado por si se
+# construye con otro context.
+
 # Git y contexto local
 .git
 .gitignore
 context/
 comando.txt
 contexto.md
+.pytest_cache/
 
 # Entornos y caches de Python
 .venv/
@@ -13,19 +19,32 @@ __pycache__/
 **/*.py[cod]
 *.egg-info/
 
-# Datos genomicos grandes (no viajan en la imagen)
+# Datos genomicos grandes (no viajan en la imagen: ~9 GB)
 datos_reales/
+ncbi_dataset*/
 *.fasta
-*.fastq
-*.fastq.gz
+*.fa
+*.ffn
+*.faa
+*.fna
+*.fasta.gz
 *.fa.gz
 *.fna.gz
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
 *.bam
 *.bai
+*.cram
+*.crai
 *.vcf
 *.vcf.gz
 *.bcf
 *.sam
+*.gff
+*.gff3
+*.gtf
 pantera
 
 # Dependencias y artefactos de la UI (npm ci los regenera en el build)
@@ -37,6 +56,10 @@ node_modules/
 docker/
 tests/
 examples/
+docs/
+.github/
 *.log
 .vscode/
 .idea/
+.ruff_cache/
+.pytest_cache/

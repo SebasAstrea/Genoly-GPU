@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar ruff
+        run: python -m pip install --upgrade pip ruff
+      - name: Lint
+        run: ruff check .
+
+  test:
+    name: Pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            ui/backend/requirements.txt
+            pyproject.toml
+      - name: Dependencias
+        run: |
+          python -m pip install --upgrade pip
+          # torch CPU: los tests no exigen CUDA y la descarga es mucho menor
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt -r ui/backend/requirements.txt
+          pip install pytest httpx
+      - name: Tests
+        run: python -m pytest tests -q

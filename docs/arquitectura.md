@@ -36,7 +36,7 @@ programación pueda usar el pipeline desde el navegador.
 
 1. **Exactitud como invariante.** Ninguna optimización puede alterar el
    resultado. Cada vía rápida se verifica contra la vía clásica con tests
-   de equivalencia (85 tests; los de streaming comparan conteos bit a bit
+   de equivalencia (161 tests en 10 ficheros; los de streaming comparan conteos bit a bit
    contra referencias brute-force para k = 1…31).
 2. **Memoria acotada, no "máquina grande".** El diseño asume un portátil
    con 8 GB de RAM y una GPU de consumo: un cromosoma humano debe

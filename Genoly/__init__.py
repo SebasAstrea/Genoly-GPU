@@ -12,23 +12,23 @@ from Genoly.core.vram import (
     estimate_encode_bytes_per_base,
     estimate_kmer_bytes_per_base,
 )
+from Genoly.encoding.encoder import SequenceEncoder, encode_to_tensor
 from Genoly.io.fasta import (
-    FastaRecord,
     FastaReader,
+    FastaRecord,
     FastaStats,
     iter_fasta_batches,
     read_fasta,
     write_fasta,
 )
-from Genoly.io.fastq import FastqRecord, FastqReader, read_fastq, write_fastq
-from Genoly.encoding.encoder import SequenceEncoder, encode_to_tensor
-from Genoly.qc.quality import QualityAnalyzer, QualityReport
+from Genoly.io.fastq import FastqReader, FastqRecord, read_fastq, write_fastq
 from Genoly.kmer.kmers import KmerCounter
-from Genoly.variants.caller import VariantCaller, Variant, Read
+from Genoly.qc.quality import QualityAnalyzer, QualityReport
+from Genoly.quantitative.gblup import GBLUPResult, GenomicBLUP
 from Genoly.quantitative.lmm import LinearMixedModel, LMMResult, build_kinship
-from Genoly.quantitative.gblup import GenomicBLUP, GBLUPResult
 from Genoly.quantitative.preprocess import PreprocessReport, prepare_quantitative_data
 from Genoly.quantitative.reml import VarianceComponents, estimate_variance_components
+from Genoly.variants.caller import Read, Variant, VariantCaller
 
 __all__ = [
     '__version__',

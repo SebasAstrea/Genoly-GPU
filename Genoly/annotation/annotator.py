@@ -16,7 +16,7 @@ de los tipos de feature solicitados.
 import gzip
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 #: Tipos de feature que se anotan por defecto (SO/GFF3).
 DEFAULT_FEATURE_TYPES = (

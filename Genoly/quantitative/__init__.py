@@ -1,6 +1,6 @@
-from Genoly.quantitative.grm import build_kinship
 from Genoly.quantitative.gblup import GBLUPResult, GenomicBLUP
-from Genoly.quantitative.lmm import LMMResult, LinearMixedModel
+from Genoly.quantitative.grm import build_kinship
+from Genoly.quantitative.lmm import LinearMixedModel, LMMResult
 from Genoly.quantitative.preprocess import (
     PreprocessReport,
     prepare_quantitative_data,

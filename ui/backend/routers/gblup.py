@@ -7,7 +7,6 @@ from Genoly.quantitative.gblup import GenomicBLUP
 from Genoly.quantitative.lmm import build_kinship
 from Genoly.quantitative.reml import estimate_variance_components
 
-
 router = APIRouter(prefix="/api/gblup", tags=["gblup"])
 
 
@@ -69,7 +68,6 @@ def predict_gblup(req: GBLUPRequest) -> GBLUPResponse:
     kinship = build_kinship(genotypes, method=req.kinship_method)
 
     if req.genetic_variance is not None:
-        variance_source = "dadas"
         log_likelihood = None
         iterations = None
         converged = None
@@ -77,7 +75,6 @@ def predict_gblup(req: GBLUPRequest) -> GBLUPResponse:
         est = estimate_variance_components(
             req.phenotypes, fixed_design, kinship, max_iter=req.max_iter,
         )
-        variance_source = "reml"
         log_likelihood = round(est.log_likelihood, 4)
         iterations = est.iterations
         converged = est.converged

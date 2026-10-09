@@ -108,6 +108,14 @@ export const api = {
 
   qdataGet: (cleanId) => request(`/qdata/${cleanId}`),
 
+  qdataGridFull: (uploadId, maxRows = null) =>
+    request(`/qdata/${encodeURIComponent(uploadId)}/grid-full`, {
+      method: 'POST',
+      body: JSON.stringify({ upload_id: uploadId, max_rows: maxRows }),
+    }),
+
+  qdataApplyFilters: (payload) =>
+    request('/qdata/apply-filters', { method: 'POST', body: JSON.stringify(payload) }),
   qdataCrossval: (payload) =>
     request('/qdata/crossval', { method: 'POST', body: JSON.stringify(payload) }),
 
@@ -125,7 +133,6 @@ export const api = {
   countKmersAsync: (payload) =>
     request('/kmer/count-async', { method: 'POST', body: JSON.stringify(payload) }),
 
-  jobStatus: (jobId) => request(`/jobs/${jobId}`),
 
   // Suscripción SSE al progreso de un trabajo. Resuelve con el resultado
   // en el evento 'done' y rechaza con el detalle en 'error'.

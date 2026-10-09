@@ -1,15 +1,13 @@
 from pathlib import Path
+from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import List, Optional
 
-from Genoly.variants.caller import VariantCaller, Read
-
+from Genoly.variants.caller import Read, VariantCaller
 from ui.backend import jobs
 from ui.backend.uploads import UPLOAD_DIR, create_upload, upload_path
-
 
 router = APIRouter(prefix="/api/variants", tags=["variants"])
 
