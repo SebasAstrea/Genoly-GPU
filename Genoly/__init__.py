@@ -24,8 +24,16 @@ from Genoly.io.fasta import (
 from Genoly.io.fastq import FastqReader, FastqRecord, read_fastq, write_fastq
 from Genoly.kmer.kmers import KmerCounter
 from Genoly.qc.quality import QualityAnalyzer, QualityReport
+from Genoly.quantitative.blup import BLUPResult, fit_blup
 from Genoly.quantitative.gblup import GBLUPResult, GenomicBLUP
 from Genoly.quantitative.lmm import LinearMixedModel, LMMResult, build_kinship
+from Genoly.quantitative.pblup import PBLUPResult, PedigreeBLUP
+from Genoly.quantitative.pedigree import (
+    PedigreeError,
+    build_a_inverse,
+    build_a_matrix,
+    normalize_pedigree,
+)
 from Genoly.quantitative.preprocess import PreprocessReport, prepare_quantitative_data
 from Genoly.quantitative.reml import VarianceComponents, estimate_variance_components
 from Genoly.variants.caller import Read, Variant, VariantCaller
@@ -64,6 +72,14 @@ __all__ = [
     'build_kinship',
     'GenomicBLUP',
     'GBLUPResult',
+    'PedigreeBLUP',
+    'PBLUPResult',
+    'PedigreeError',
+    'build_a_matrix',
+    'build_a_inverse',
+    'normalize_pedigree',
+    'BLUPResult',
+    'fit_blup',
     'VarianceComponents',
     'estimate_variance_components',
     'PreprocessReport',

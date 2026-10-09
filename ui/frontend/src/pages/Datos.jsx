@@ -13,10 +13,46 @@ import {
   IconPlay,
   IconTarget,
   IconRefresh,
+  IconPulse,
+  IconDna,
 } from '../components/icons.jsx'
 
 const CHUNK_SIZE = 32 * 1024 * 1024
 const CHUNK_THRESHOLD = 1024 * 1024 * 1024
+// por encima de este tamaño la tabla interactiva deja de cargar la grid
+const GRID_MAX_ROWS = 20000
+
+const DEFAULT_OPTIONS = {
+  phenotype_col: 0,
+  impute_method: 'media',
+  max_column_missingness: 1.0,
+  min_individuals: 5,
+  min_markers: 2,
+  min_maf: 0.0,
+  hwe_p: '',
+  id_col: null,
+  sire_col: null,
+  dam_col: null,
+  dataset_kind: 'mixto',
+}
+
+// autodetección de columnas de pedigrí por nombre de cabecera
+const ID_HINTS = ['id', 'animal', 'individual', 'individuo', 'head', 'cabeza']
+const SIRE_HINTS = ['sire', 'padre', 'father', 'toro', 'p']
+const DAM_HINTS = ['dam', 'madre', 'mother', 'vaca', 'm']
+
+function detectColumn(names, hints) {
+  const lower = (names || []).map((n) => String(n ?? '').trim().toLowerCase())
+  for (const hint of hints) {
+    const i = lower.indexOf(hint)
+    if (i >= 0) return i
+  }
+  // coincidencia laxa sólo con pistas de 3+ letras (evita 'p'/'m' solos)
+  for (let i = 0; i < lower.length; i++) {
+    if (hints.filter((h) => h.length >= 3).some((h) => lower[i].includes(h))) return i
+  }
+  return null
+}
 
 function fmt(n) {
   return n?.toLocaleString()
@@ -72,24 +108,18 @@ export default function Datos() {
   const [upload, setUpload] = useState(null)
   const [serverPath, setServerPath] = useState('')
   const [preview, setPreview] = useState(null)
-  const [options, setOptions] = useState({
-    phenotype_col: 0,
-    impute_method: 'media',
-    max_column_missingness: 1.0,
-    min_individuals: 5,
-    min_markers: 2,
-    min_maf: 0.0,
-    hwe_p: '',
-  })
+  const [options, setOptions] = useState(DEFAULT_OPTIONS)
   const [running, setRunning] = useState(false)
   const [cleanResult, setCleanResult] = useState(null)
   const [progress, setProgress] = useState(null)
   const [error, setError] = useState(null)
+  const [dryRun, setDryRun] = useState({ loading: false, result: null, error: null })
   const [cv, setCv] = useState({ running: false, result: null, error: null })
   const [cvParams, setCvParams] = useState({ n_folds: 5, n_repeats: 1 })
   const [gwas, setGwas] = useState({ running: false, result: null, error: null })
   const [gwasMaf, setGwasMaf] = useState(0.05)
   const [kin, setKin] = useState({ running: false, result: null, error: null })
+  const recipeRef = useRef(null)
 
   const uploadFile = async (file) => {
     if (file.size > CHUNK_THRESHOLD) {
@@ -159,12 +189,77 @@ export default function Datos() {
     }
   }
 
-  // mantener la columna de fenotipo válida al cargar el perfil
+  // mantener la columna de fenotipo válida y autodetectar pedigrí al perfilar
   useEffect(() => {
     if (!preview?.columns?.length) return
     const max = preview.columns.length - 1
-    setOptions((o) => ({ ...o, phenotype_col: Math.min(o.phenotype_col, max) }))
+    const names = preview.column_names || []
+    setOptions((o) => {
+      const next = { ...o, phenotype_col: Math.min(o.phenotype_col, max) }
+      if (next.id_col == null || next.id_col > max) next.id_col = detectColumn(names, ID_HINTS)
+      if (next.sire_col == null || next.sire_col > max) next.sire_col = detectColumn(names, SIRE_HINTS)
+      if (next.dam_col == null || next.dam_col > max) next.dam_col = detectColumn(names, DAM_HINTS)
+      if (next.sire_col != null || next.dam_col != null) next.dataset_kind = next.dataset_kind || 'mixto'
+      return next
+    })
   }, [preview])
+
+  const cleanPayload = (opts = options) => ({
+    upload_id: upload.upload_id,
+    phenotype_col: opts.phenotype_col,
+    impute_method: opts.impute_method,
+    max_column_missingness: opts.max_column_missingness,
+    min_individuals: opts.min_individuals,
+    min_markers: opts.dataset_kind === 'pedigree' ? 0 : opts.min_markers,
+    min_maf: opts.min_maf,
+    hwe_p: opts.hwe_p ? Number(opts.hwe_p) : null,
+    id_col: opts.id_col,
+    sire_col: opts.sire_col,
+    dam_col: opts.dam_col,
+  })
+
+  const runDryRun = async () => {
+    if (!upload) return
+    setDryRun((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const result = await api.qdataPreviewClean(cleanPayload())
+      setDryRun({ loading: false, result, error: null })
+    } catch (e) {
+      setDryRun({ loading: false, result: null, error: e.message })
+    }
+  }
+
+  // vista previa de limpieza automática al cargar el archivo o cambiar opciones
+  useEffect(() => {
+    if (!upload?.upload_id || !preview) return
+    const t = setTimeout(() => { runDryRun() }, 300)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upload?.upload_id, preview, options])
+
+  const exportRecipe = () => {
+    const blob = new Blob([JSON.stringify(options, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'genoly-receta-limpieza.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const importRecipe = (file) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result))
+        setOptions((o) => ({ ...o, ...parsed }))
+      } catch {
+        setError('La receta no es un JSON válido')
+      }
+    }
+    reader.readAsText(file)
+  }
 
   const run = async () => {
     if (!upload) return
@@ -172,11 +267,7 @@ export default function Datos() {
     setError(null)
     setCleanResult(null)
     try {
-      const job = await api.qdataClean({
-        upload_id: upload.upload_id,
-        ...options,
-        hwe_p: options.hwe_p ? Number(options.hwe_p) : null,
-      })
+      const job = await api.qdataClean(cleanPayload())
       const res = await api.jobEvents(job.job_id, { onProgress: (p) => setProgress(p) })
       const matrix = await api.qdataGet(res.clean_id)
       setQdata({ ...matrix, source: upload.filename })
@@ -189,22 +280,23 @@ export default function Datos() {
     }
   }
 
-  // Handle interactive grid "Apply clean" callback
-  const handleGridCleaned = async (filteredRows) => {
-    if (!upload || !filteredRows?.length) return
+  // Interactive grid "Aplicar y continuar": filtros por definición + ediciones
+  const handleGridCleaned = async ({ filters = {}, edits = [] } = {}) => {
+    if (!upload) return
     setRunning(true)
     setError(null)
     setCleanResult(null)
     try {
+      const filtersObj = {}
+      for (const [col, f] of Object.entries(filters)) {
+        filtersObj[col] = { vals: [...f.vals], vacios: !!f.vacios }
+      }
       const job = await api.qdataApplyFilters({
-        rows: filteredRows,
-        phenotype_col: options.phenotype_col,
-        impute_method: options.impute_method,
-        max_column_missingness: options.max_column_missingness,
-        min_individuals: options.min_individuals,
-        min_markers: options.min_markers,
-        min_maf: options.min_maf,
-        hwe_p: options.hwe_p ? Number(options.hwe_p) : null,
+        ...cleanPayload(),
+        upload_id: upload.upload_id,
+        header: !!preview?.header_detected,
+        filters: filtersObj,
+        edits,
       })
       const res = await api.jobEvents(job.job_id, { onProgress: (p) => setProgress(p) })
       const matrix = await api.qdataGet(res.clean_id)
@@ -266,6 +358,8 @@ export default function Datos() {
   const columns = preview?.columns ?? []
   const maxMissing = Math.max(...columns.map((c) => c.missing_pct), 0)
   const report = cleanResult?.report
+  // CV/GWAS/parentesco necesitan marcadores genómicos (no dataset solo pedigrí)
+  const hasMarkers = (qdata?.genotypes?.[0]?.length ?? 0) > 0
 
   return (
     <div className="space-y-8">
@@ -307,7 +401,13 @@ export default function Datos() {
 
           <Card title="Limpieza" subtitle="Opciones aplicadas al limpiar"
             icon={<IconCog className="h-5 w-5" />}>
-            <label className="label">Columna de fenotipo</label>
+            <label className="label">Tipo de dataset</label>
+            <select className="input" value={options.dataset_kind}
+              onChange={(e) => setOptions({ ...options, dataset_kind: e.target.value })}>
+              <option value="mixto">Mixto (fenotipo + marcadores [+ pedigrí])</option>
+              <option value="pedigree">Solo pedigrí (sin marcadores)</option>
+            </select>
+            <label className="label mt-3">Columna de fenotipo</label>
             <select className="input" value={options.phenotype_col}
               onChange={(e) => setOptions({ ...options, phenotype_col: Number(e.target.value) })}>
               {columns.map((c) => (
@@ -316,16 +416,56 @@ export default function Datos() {
                 </option>
               ))}
             </select>
-            <label className="label mt-3">Imputación de dosis perdidas</label>
-            <select className="input" value={options.impute_method}
-              onChange={(e) => setOptions({ ...options, impute_method: e.target.value })}>
-              <option value="media">Media</option>
-              <option value="moda">Moda</option>
-            </select>
-            <label className="label mt-3">Máx. datos perdidos por marcador ({Math.round(options.max_column_missingness * 100)}%)</label>
-            <input type="range" min={0} max={1} step={0.05} className="w-full accent-accent"
-              value={options.max_column_missingness}
-              onChange={(e) => setOptions({ ...options, max_column_missingness: Number(e.target.value) })} />
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <div>
+                <label className="label">ID</label>
+                <select className="input" value={options.id_col ?? ''}
+                  onChange={(e) => setOptions({ ...options, id_col: e.target.value === '' ? null : Number(e.target.value) })}>
+                  <option value="">— ninguno —</option>
+                  {columns.map((c) => (
+                    <option key={c.index} value={c.index}>{c.index}: {c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="label">Padre</label>
+                <select className="input" value={options.sire_col ?? ''}
+                  onChange={(e) => setOptions({ ...options, sire_col: e.target.value === '' ? null : Number(e.target.value) })}>
+                  <option value="">— ninguno —</option>
+                  {columns.map((c) => (
+                    <option key={c.index} value={c.index}>{c.index}: {c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="label">Madre</label>
+                <select className="input" value={options.dam_col ?? ''}
+                  onChange={(e) => setOptions({ ...options, dam_col: e.target.value === '' ? null : Number(e.target.value) })}>
+                  <option value="">— ninguno —</option>
+                  {columns.map((c) => (
+                    <option key={c.index} value={c.index}>{c.index}: {c.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <p className="mt-1 text-[10px] text-ink-faint">
+              El pedigrí (padre/madre) se conserva aunque no sea numérico y se usa para PBLUP.
+            </p>
+
+            {options.dataset_kind === 'mixto' && (
+              <>
+                <label className="label mt-3">Imputación de dosis perdidas</label>
+                <select className="input" value={options.impute_method}
+                  onChange={(e) => setOptions({ ...options, impute_method: e.target.value })}>
+                  <option value="media">Media</option>
+                  <option value="moda">Moda</option>
+                </select>
+                <label className="label mt-3">Máx. datos perdidos por marcador ({Math.round(options.max_column_missingness * 100)}%)</label>
+                <input type="range" min={0} max={1} step={0.05} className="w-full accent-accent"
+                  value={options.max_column_missingness}
+                  onChange={(e) => setOptions({ ...options, max_column_missingness: Number(e.target.value) })} />
+              </>
+            )}
             <div className="mt-3 grid grid-cols-2 gap-3">
               <div>
                 <label className="label">Mín. individuos</label>
@@ -334,31 +474,103 @@ export default function Datos() {
               </div>
               <div>
                 <label className="label">Mín. marcadores</label>
-                <input type="number" min={1} className="input" value={options.min_markers}
+                <input type="number" min={0} className="input" disabled={options.dataset_kind === 'pedigree'}
+                  value={options.dataset_kind === 'pedigree' ? 0 : options.min_markers}
                   onChange={(e) => setOptions({ ...options, min_markers: Number(e.target.value) })} />
               </div>
             </div>
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">MAF mín. (0–0.5)</label>
-                <input type="number" min={0} max={0.5} step={0.01} className="input"
-                  value={options.min_maf}
-                  onChange={(e) => setOptions({ ...options, min_maf: Number(e.target.value) })} />
+            {options.dataset_kind === 'mixto' && (
+              <div className="mt-3 grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">MAF mín. (0–0.5)</label>
+                  <input type="number" min={0} max={0.5} step={0.01} className="input"
+                    value={options.min_maf}
+                    onChange={(e) => setOptions({ ...options, min_maf: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label className="label">HWE (p mín.)</label>
+                  <select className="input" value={options.hwe_p}
+                    onChange={(e) => setOptions({ ...options, hwe_p: e.target.value })}>
+                    <option value="">Ninguno</option>
+                    <option value="0.05">0.05</option>
+                    <option value="0.01">0.01</option>
+                    <option value="0.001">0.001</option>
+                  </select>
+                </div>
               </div>
-              <div>
-                <label className="label">HWE (p mín.)</label>
-                <select className="input" value={options.hwe_p}
-                  onChange={(e) => setOptions({ ...options, hwe_p: e.target.value })}>
-                  <option value="">Ninguno</option>
-                  <option value="0.05">0.05</option>
-                  <option value="0.01">0.01</option>
-                  <option value="0.001">0.001</option>
-                </select>
-              </div>
+            )}
+            {options.dataset_kind === 'mixto' && (
+              <p className="mt-1 text-[10px] text-ink-faint">
+                MAF = frecuencia alélica menor; HWE = equilibrio de Hardy-Weinberg. Descartan marcadores de baja calidad.
+              </p>
+            )}
+
+            <div className="mt-3 flex gap-2">
+              <button className="btn-ghost flex-1 text-xs" onClick={exportRecipe} disabled={!upload}>
+                Exportar receta
+              </button>
+              <button className="btn-ghost flex-1 text-xs" onClick={() => recipeRef.current?.click()}>
+                Importar receta
+              </button>
+              <input ref={recipeRef} type="file" accept="application/json,.json" className="hidden"
+                onChange={(e) => { importRecipe(e.target.files?.[0]); e.target.value = '' }} />
             </div>
-            <p className="mt-1 text-[10px] text-ink-faint">
-              MAF = frecuencia alélica menor; HWE = equilibrio de Hardy-Weinberg. Descartan marcadores de baja calidad.
-            </p>
+
+            {/* Vista previa de la limpieza (dry-run) */}
+            {upload && (
+              <div className="mt-3 rounded-lg border border-line/30 bg-panel-2/40 p-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold text-ink">Impacto de la limpieza (vista previa)</p>
+                  <button className="text-[11px] text-accent hover:underline" onClick={runDryRun}
+                    disabled={dryRun.loading}>
+                    {dryRun.loading ? 'Calculando…' : 'Recalcular'}
+                  </button>
+                </div>
+                {dryRun.error && (
+                  <p className="mt-2 rounded border border-bad/40 bg-bad/10 px-2 py-1 text-[11px] text-bad">{dryRun.error}</p>
+                )}
+                {dryRun.result && (
+                  <div className="mt-2 space-y-2">
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <p className="text-ink-faint">
+                        Filas: <span className="font-mono text-ink">{fmt(dryRun.result.report.rows_read)}</span>
+                        {' → '}
+                        <span className="font-mono text-accent-glow">{fmt(dryRun.result.projected.rows)}</span>
+                      </p>
+                      <p className="text-ink-faint">
+                        Marcadores: <span className="font-mono text-ink">{fmt(dryRun.result.report.columns_total)}</span>
+                        {' → '}
+                        <span className="font-mono text-accent-glow">{fmt(dryRun.result.projected.markers)}</span>
+                      </p>
+                    </div>
+                    {dryRun.result.blocking_errors?.length > 0 && (
+                      <ul className="space-y-1">
+                        {dryRun.result.blocking_errors.map((msg, i) => (
+                          <li key={i} className="rounded border border-bad/40 bg-bad/10 px-2 py-1 text-[11px] text-bad">
+                            {msg}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {dryRun.result.qc_flags?.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {dryRun.result.qc_flags.map((f) => (
+                          <span key={f.code} title={f.message}
+                            className="rounded-full bg-warn/20 px-2 py-0.5 text-[10px] font-semibold text-warn">
+                            {f.message}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {dryRun.result.report.dropped_columns?.length > 0 && (
+                      <p className="text-[11px] text-ink-faint">
+                        {dryRun.result.report.dropped_columns.length} columna(s) descartada(s) por tipo/perdidos.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <button className="btn-primary mt-3 w-full" onClick={run} disabled={running || !upload}>
               <IconPlay className="h-4 w-4" />
@@ -386,11 +598,47 @@ export default function Datos() {
                 <button className="btn-ghost mt-2 w-full" onClick={() => sendTo('/gblup')}>
                   Enviar a GBLUP
                 </button>
+                <button className="btn-ghost mt-2 w-full" onClick={() => sendTo('/pblup')}>
+                  Enviar a PBLUP
+                </button>
                 <p className="mt-2 text-[11px] text-ink-faint">
                   En sesión: <span className="font-mono text-accent-glow">{qdata.source}</span>
                 </p>
               </Card>
 
+              <Card title="Pedigrí" subtitle="Resumen de las columnas de parentesco"
+                icon={<IconDna className="h-5 w-5" />}>
+                {qdata.pedigree ? (
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <dt className="text-ink-faint">Individuos</dt>
+                      <dd className="font-mono text-accent-glow">
+                        {qdata.pedigree.individuals?.length ?? 0}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-faint">Padres listados</dt>
+                      <dd className="font-mono text-accent-glow">
+                        {(qdata.pedigree.sires ?? []).filter((s) => s != null).length}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-ink-faint">Madres listadas</dt>
+                      <dd className="font-mono text-accent-glow">
+                        {(qdata.pedigree.dams ?? []).filter((d) => d != null).length}
+                      </dd>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-ink-faint">
+                    Sin columnas de pedigrí: PBLUP no estará disponible hasta
+                    que selecciones ID/Padre/Madre y vuelvas a limpiar.
+                  </p>
+                )}
+              </Card>
+
+              {hasMarkers && (
+                <>
               <Card title="Validación cruzada" subtitle="Exactitud de la predicción GBLUP (K-fold)"
                 icon={<IconTarget className="h-5 w-5" />}>
                 <div className="flex items-end gap-3">
@@ -544,6 +792,8 @@ export default function Datos() {
                   </div>
                 )}
               </Card>
+                </>
+              )}
             </>
           )}
         </div>
@@ -596,7 +846,15 @@ export default function Datos() {
             <Card title="Vista interactiva" subtitle="Filtra, edita y limpia fila a fila antes de enviar al análisis"
               icon={<IconList className="h-5 w-5" />}
               actions={running ? <Badge tone="warn">limpiando…</Badge> : null}>
-              <FiltableGrid uploadId={upload.upload_id} onCleaned={handleGridCleaned} />
+              {(upload.records ?? 0) > GRID_MAX_ROWS ? (
+                <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-3 text-xs text-warn">
+                  El archivo tiene {fmt(upload.records)} filas; la vista interactiva se oculta por encima de
+                  {' '}{fmt(GRID_MAX_ROWS)} filas. Usa «Limpiar y preparar» con las opciones de la izquierda
+                  (incluye la vista previa de impacto).
+                </div>
+              ) : (
+                <FiltableGrid uploadId={upload.upload_id} onCleaned={handleGridCleaned} />
+              )}
             </Card>
           )}
 

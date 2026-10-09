@@ -11,6 +11,7 @@ router = APIRouter(prefix="/api/quantitative", tags=["quantitative"])
 class QuantitativeRequest(BaseModel):
     phenotypes: List[float]
     genotypes: List[List[Optional[float]]]
+    individuals: Optional[List[str]] = None
     method: str = "reml"
     max_iter: int = 100
     kinship_method: str = "vanraden"
@@ -76,7 +77,12 @@ def fit_lmm(req: QuantitativeRequest) -> QuantitativeResponse:
         converged=result.converged,
         fixed_effects=[round(v, 6) for v in model.blue().tolist()],
         blup=[
-            {"individual": i + 1, "value": round(v, 6)}
+            {
+                "individual": (req.individuals[i]
+                               if req.individuals and i < len(req.individuals)
+                               else i + 1),
+                "value": round(v, 6),
+            }
             for i, v in enumerate(model.blup().tolist())
         ],
     )

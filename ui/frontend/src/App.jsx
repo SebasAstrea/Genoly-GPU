@@ -14,6 +14,7 @@ import Datos from './pages/Datos.jsx'
 import Variants from './pages/Variants.jsx'
 import Quantitative from './pages/Quantitative.jsx'
 import Gblup from './pages/Gblup.jsx'
+import Pblup from './pages/Pblup.jsx'
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/variants" element={<Variants />} />
           <Route path="/quantitative" element={<Quantitative />} />
           <Route path="/gblup" element={<Gblup />} />
+          <Route path="/pblup" element={<Pblup />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

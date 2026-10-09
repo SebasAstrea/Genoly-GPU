@@ -13,6 +13,7 @@ router = APIRouter(prefix="/api/gblup", tags=["gblup"])
 class GBLUPRequest(BaseModel):
     phenotypes: List[float]
     genotypes: List[List[Optional[float]]]
+    individuals: Optional[List[str]] = None
     kinship_method: str = "vanraden"
     genetic_variance: Optional[float] = None
     residual_variance: Optional[float] = None
@@ -105,7 +106,9 @@ def predict_gblup(req: GBLUPRequest) -> GBLUPResponse:
         fixed_effects=[round(v, 6) for v in model.blue().tolist()],
         blup=[
             {
-                "individual": i + 1,
+                "individual": (req.individuals[i]
+                               if req.individuals and i < len(req.individuals)
+                               else i + 1),
                 "value": round(v, 6),
                 "reliability": round(r, 6),
                 "accuracy": round(a, 6),

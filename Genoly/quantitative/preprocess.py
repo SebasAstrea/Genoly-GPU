@@ -310,6 +310,16 @@ def _marker_qc(genotypes: List[List[float]],
     return keep, low_maf, bad_hwe
 
 
+def _pedigree_value(cell: Optional[str]) -> Optional[str]:
+    """Celda de ID/pedigrí: None si falta, texto recortado si existe."""
+    if cell is None:
+        return None
+    s = str(cell).strip()
+    if s.lower() in _MISSING_TOKENS:
+        return None
+    return s
+
+
 def clean_grid(grid: List[List[Optional[str]]],
                phenotype_col: int = 0,
                impute_method: str = "media",
@@ -318,16 +328,25 @@ def clean_grid(grid: List[List[Optional[str]]],
                min_markers: int = 2,
                min_maf: float = 0.0,
                hwe_p: Optional[float] = None,
-               ) -> Tuple[List[float], List[List[float]], List[str], dict]:
+               id_col: Optional[int] = None,
+               sire_col: Optional[int] = None,
+               dam_col: Optional[int] = None,
+               dry_run: bool = False,
+               ) -> Tuple[List[float], List[List[float]], List[str],
+                          Optional[dict], dict]:
     """
     Limpieza robusta de una matriz sucia para los modelos cuantitativos.
 
     Aplica, en orden:
     1. Detección de cabecera y delimitador (ya hechos en ``load_grid``).
-    2. Descarte de columnas no numéricas (salvo el fenotipo) o con
+    2. Preservación de las columnas de ID y pedigrí (padre/madre), aunque
+       no sean numéricas: nunca se interpretan como marcadores.
+    3. Descarte de columnas no numéricas (salvo fenotipo/pedigrí/ID) o con
        proporción de datos perdidos mayor que ``max_column_missingness``.
-    3. Descarte de filas sin fenotipo numérico.
-    4. Imputación de dosis perdidas por media o moda del marcador.
+    4. Descarte de filas sin fenotipo numérico.
+    5. Imputación de dosis perdidas por media o moda del marcador
+       (se omite si no hay marcadores).
+    6. QC de marcadores (MAF/HWE) y señales de calidad (``qc_flags``).
 
     Args:
         grid: Matriz de celdas crudas.
@@ -336,10 +355,24 @@ def clean_grid(grid: List[List[Optional[str]]],
         max_column_missingness: Proporción máxima de celdas vacías por
             marcador (0-1) para conservarlo.
         min_individuals: Mínimo de individuos tras la limpieza.
-        min_markers: Mínimo de marcadores útiles tras la limpieza.
+        min_markers: Mínimo de marcadores útiles tras la limpieza
+            (0 permite datasets sólo con pedigrí).
+        id_col: Índice opcional de la columna de identificador.
+        sire_col: Índice opcional de la columna del padre.
+        dam_col: Índice opcional de la columna de la madre.
+        dry_run: Si es True, los umbrales incumplidos no lanzan excepción:
+            se acumulan en ``report["blocking_errors"]`` y se devuelve el
+            resultado proyectado (para la vista previa de limpieza).
 
     Returns:
-        Tupla (fenotipos, genotipos, nombres_de_marcadores, reporte).
+        Tupla (fenotipos, genotipos, nombres_de_marcadores, pedigrí,
+        reporte). ``pedigree`` es None si no hay columnas de padre/madre;
+        si no, dict con ``individuals``/``sires``/``dams`` alineados con
+        los fenotipos (padres ausentes como None).
+
+    Raises:
+        ValueError: Parámetros inválidos, o resultados por debajo de los
+            mínimos cuando ``dry_run`` es False.
     """
     if impute_method not in IMPUTE_METHODS:
         raise ValueError(
@@ -366,13 +399,25 @@ def clean_grid(grid: List[List[Optional[str]]],
 
     if not 0 <= phenotype_col < width:
         raise ValueError("Índice de columna de fenotipo inválido")
+    for label, idx in (("ID", id_col), ("padre", sire_col),
+                       ("madre", dam_col)):
+        if idx is not None and not 0 <= idx < width:
+            raise ValueError(f"Índice de columna de {label} inválido")
+    pedigree_idxs = [c for c in (id_col, sire_col, dam_col) if c is not None]
+    if len(set(pedigree_idxs)) != len(pedigree_idxs):
+        raise ValueError("Las columnas de ID, padre y madre deben ser distintas")
+    if phenotype_col in pedigree_idxs:
+        raise ValueError(
+            "La columna de fenotipo no puede ser también de ID/pedigrí")
+    special_cols = {phenotype_col, *pedigree_idxs}
+    has_pedigree = sire_col is not None or dam_col is not None
 
     body = [[_to_number(c) for c in row] for row in grid]
 
     kept_cols = []
     dropped_columns = []
     for j in range(width):
-        if j == phenotype_col:
+        if j in special_cols:
             kept_cols.append(j)
             continue
         values = [row[j] for row in body if row[j] is not None]
@@ -389,61 +434,126 @@ def clean_grid(grid: List[List[Optional[str]]],
             else:
                 reason = f"datos perdidos {missing_pct:.0%}"
             dropped_columns.append({"name": column_names[j], "reason": reason})
+    # columnas de marcador: las conservadas que no son fenotipo ni pedigrí
+    marker_cols = [j for j in kept_cols if j not in special_cols]
 
     phenotypes: List[float] = []
     genotypes: List[List[Optional[float]]] = []
+    ids: List[Optional[str]] = []
+    sires: List[Optional[str]] = []
+    dams: List[Optional[str]] = []
     dropped_rows_no_phenotype = 0
-    for row in body:
+    out_of_range_doses = 0
+    sire_eq_dam = 0
+    for i, row in enumerate(body):
         pheno = row[phenotype_col]
         if pheno is None or pheno != pheno:
             dropped_rows_no_phenotype += 1
             continue
         phenotypes.append(pheno)
-        genotypes.append([row[j] for j in kept_cols if j != phenotype_col])
+        genotypes.append([row[j] for j in marker_cols])
+        for j in marker_cols:
+            v = row[j]
+            if v is not None and v == v and v not in (0.0, 1.0, 2.0):
+                out_of_range_doses += 1
+        if id_col is None:
+            ids.append(f"IND-{len(phenotypes):04d}")
+        else:
+            ids.append(_pedigree_value(grid[i][id_col]))
+        sire = _pedigree_value(grid[i][sire_col]) if sire_col is not None else None
+        dam = _pedigree_value(grid[i][dam_col]) if dam_col is not None else None
+        if sire is not None and dam is not None and sire == dam:
+            sire_eq_dam += 1
+        sires.append(sire)
+        dams.append(dam)
+
+    blocking_errors: List[str] = []
+
+    def _block(msg: str) -> None:
+        if dry_run:
+            blocking_errors.append(msg)
+        else:
+            raise ValueError(msg)
 
     if len(phenotypes) < min_individuals:
-        raise ValueError(
-            f"Tras la limpieza quedan {len(phenotypes)} individuos; "
-            f"se necesitan al menos {min_individuals}")
-    if len(kept_cols) - 1 < min_markers:
-        raise ValueError(
-            f"Tras la limpieza quedan {len(kept_cols) - 1} marcadores; "
-            f"se necesitan al menos {min_markers}")
+        _block(f"Tras la limpieza quedan {len(phenotypes)} individuos; "
+               f"se necesitan al menos {min_individuals}")
+    if len(marker_cols) < min_markers:
+        _block(f"Tras la limpieza quedan {len(marker_cols)} marcadores; "
+               f"se necesitan al menos {min_markers}")
 
     imputed_cells = 0
-    n_markers = len(genotypes[0])
-    for j in range(n_markers):
-        observed = [row[j] for row in genotypes if row[j] is not None]
-        if not observed:
-            continue
-        if impute_method == "moda":
-            fill = max(set(observed), key=observed.count)
-        else:
-            fill = sum(observed) / len(observed)
-        for row in genotypes:
-            if row[j] is None:
-                row[j] = fill
-                imputed_cells += 1
+    n_markers = len(marker_cols)
+    if genotypes and n_markers:
+        for j in range(n_markers):
+            observed = [row[j] for row in genotypes if row[j] is not None]
+            if not observed:
+                continue
+            if impute_method == "moda":
+                fill = max(set(observed), key=observed.count)
+            else:
+                fill = sum(observed) / len(observed)
+            for row in genotypes:
+                if row[j] is None:
+                    row[j] = fill
+                    imputed_cells += 1
 
-    # QC de marcadores: MAF y equilibrio de Hardy-Weinberg
-    keep_idx, low_maf_idx, hwe_idx = _marker_qc(
-        genotypes, min_maf=min_maf, hwe_p=hwe_p)
-    dropped_maf = [column_names[kept_cols[k + 1]]
-                   for k in low_maf_idx]
-    dropped_hwe = [column_names[kept_cols[k + 1]]
-                   for k in hwe_idx]
-    # subconjunto de marcadores conservados
-    kept_marker_positions = keep_idx
-    genotypes = [[row[k] for k in kept_marker_positions]
-                 for row in genotypes]
-    n_markers = len(genotypes[0])
-    markers = [column_names[kept_cols[k + 1]]
-               for k in kept_marker_positions]
+        # QC de marcadores: MAF y equilibrio de Hardy-Weinberg
+        keep_idx, low_maf_idx, hwe_idx = _marker_qc(
+            genotypes, min_maf=min_maf, hwe_p=hwe_p)
+        genotypes = [[row[k] for k in keep_idx] for row in genotypes]
+    else:
+        keep_idx, low_maf_idx, hwe_idx = [], [], []
+
+    dropped_maf = [column_names[marker_cols[k]] for k in low_maf_idx]
+    dropped_hwe = [column_names[marker_cols[k]] for k in hwe_idx]
+    markers = [column_names[marker_cols[k]] for k in keep_idx]
+    n_markers = len(markers)
 
     if n_markers < min_markers:
-        raise ValueError(
-            f"Tras la limpieza quedan {n_markers} marcadores; "
-            f"se necesitan al menos {min_markers}")
+        _block(f"Tras la limpieza quedan {n_markers} marcadores; "
+               f"se necesitan al menos {min_markers}")
+
+    qc_flags = []
+    if out_of_range_doses:
+        qc_flags.append({
+            "code": "dosis_fuera_de_rango",
+            "count": out_of_range_doses,
+            "message": (f"{out_of_range_doses} dosis fuera de {{0,1,2}} "
+                        "en las columnas de marcador"),
+        })
+    if sire_eq_dam:
+        qc_flags.append({
+            "code": "sire_eq_dam",
+            "count": sire_eq_dam,
+            "message": (f"{sire_eq_dam} individuos con el mismo padre y "
+                        "madre"),
+        })
+    if id_col is not None:
+        empty_ids = sum(1 for v in ids if v is None)
+        if empty_ids:
+            qc_flags.append({
+                "code": "ids_vacios",
+                "count": empty_ids,
+                "message": f"{empty_ids} individuos sin identificador",
+            })
+        filled = [v for v in ids if v is not None]
+        dup_ids = len(filled) - len(set(filled))
+        if dup_ids:
+            qc_flags.append({
+                "code": "ids_duplicados",
+                "count": dup_ids,
+                "message": f"{dup_ids} identificadores duplicados",
+            })
+
+    pedigree = None
+    if has_pedigree or id_col is not None:
+        pedigree = {
+            "individuals": [v if v is not None else f"IND-{k + 1:04d}"
+                            for k, v in enumerate(ids)],
+            "sires": sires,
+            "dams": dams,
+        }
 
     report = {
         "rows_read": rows_read,
@@ -458,8 +568,16 @@ def clean_grid(grid: List[List[Optional[str]]],
         "phenotype_column": column_names[phenotype_col],
         "dropped_by_maf": dropped_maf,
         "dropped_by_hwe": dropped_hwe,
+        "pedigree_columns": {
+            "id": column_names[id_col] if id_col is not None else None,
+            "sire": column_names[sire_col] if sire_col is not None else None,
+            "dam": column_names[dam_col] if dam_col is not None else None,
+        },
+        "qc_flags": qc_flags,
+        "blocking_errors": blocking_errors,
+        "dry_run": bool(dry_run),
     }
-    return phenotypes, genotypes, markers, report
+    return phenotypes, genotypes, markers, pedigree, report
 
 
 def preprocess_grid(grid: List[List[Optional[str]]],

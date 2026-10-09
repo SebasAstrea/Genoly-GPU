@@ -17,9 +17,3 @@ export function QDataProvider({ children }) {
 export function useQData() {
   return useContext(QDataContext)
 }
-
-export function qdataToText(data) {
-  return data.phenotypes
-    .map((p, i) => [p, ...data.genotypes[i]].join(','))
-    .join('\n')
-}

@@ -16,6 +16,8 @@ Genoly-GPU ofrece las herramientas de un pipeline de genómica estándar —I/O 
 - Pileup y llamada de variantes (SNV y deleciones) sobre GPU mediante operaciones de dispersión.
 - Genética cuantitativa sobre GPU: modelos lineales mixtos (LMM) con estimación REML/ML, matriz de parentesco genómica (VanRaden o GCTA) y predicción de valores de cría (BLUP).
 - Predicción genómica GBLUP en un paso con varianzas conocidas o estimadas por REML, incluyendo fiabilidad y precisión por individuo (PEV).
+- Predicción por modelo animal PBLUP a partir del pedigrí (columnas sire/dam): matriz de parentesco A, endogamia F, REML o varianzas fijas, fiabilidades.
+- Flujo obligatorio de limpieza: todo dataset de genética cuantitativa (GBLUP, PBLUP o modelos mixtos) se adjunta y limpia primero en la página Datos, con vista previa (dry-run), filtros por columna y tabla interactiva paginada.
 - Carga de tablas CSV o Excel con preprocesamiento: detección de cabecera y delimitador, conversión de decimales con coma, limpieza de columnas/filas no válidas e imputación de dosis perdidas por media o moda.
 - Detección automática de la GPU NVIDIA con nvidia-smi e instalación automática de la build de PyTorch con CUDA más conveniente.
 - Alineamiento con el algoritmo Smith-Waterman implementado sobre PyTorch.
@@ -99,8 +101,8 @@ Genoly-GPU/
 │   ├── test_variant_pipeline.py  # SAM -> variantes -> VCF y su job
 │   ├── test_downstream.py        # PCA / KMeans / t-SNE y su job
 │   ├── test_annotation_report.py # GFF/GO, SVG de heatmap y volcano, jobs de anotación/informe
-│   ├── test_quantgen_extra.py    # Validación cruzada, GWAS, GRM, MAF/HWE
-│   ├── test_api.py               # API REST: auth, límites de subida, LFI, SSE
+│   ├── test_quantgen_extra.py    # Validación cruzada, GWAS, GRM, MAF/HWE, pedigrí (A/F), PBLUP
+│   ├── test_api.py               # API REST: auth, límites de subida, LFI, SSE, PBLUP
 │   ├── test_worker.py            # Aislamiento de procesos y limpieza de spills huérfanos
 │   └── conftest.py               # sys.path de la raíz (una sola vez)
 ├── ui/
@@ -114,7 +116,7 @@ Genoly-GPU/
 │   │   ├── registry.py           # Registro JSON con candado entre procesos
 │   │   ├── maintenance.py        # Límites de tamaño y caducidad (TTL) de archivos
 │   │   └── routers/              # device, qc, kmer, variants, map, downstream, annotation,
-│   │                             # report, quantitative, gblup, qdata, dataset, upload, jobs
+│   │                             # report, quantitative, gblup, pblup, qdata, dataset, upload, jobs
 │   └── frontend/                 # UI React + Vite + Tailwind
 │       └── src/                  # páginas y componentes
 ├── fetchingfasta.py              # Descarga de FASTA desde NCBI por accession
@@ -143,9 +145,10 @@ Genoly-GPU incluye una interfaz web moderna construida con **React + Vite + Tail
 | `/downstream` | PCA, clustering (KMeans) y t-SNE de datos genómicos. |
 | `/annotation` | Anotación funcional a partir de GFF y Gene Ontology. |
 | `/report` | Informes con heatmap y volcano (SVG/Markdown). |
-| `/datos` | Gestión de datasets (subida de FASTA/ZIP y registro de rutas). |
-| `/quantitative` | Genética cuantitativa: LMM (REML/ML) y valores de cría BLUP. |
-| `/gblup` | Predicción genómica GBLUP con fiabilidad y precisión por individuo. |
+| `/datos` | Adjuntar y limpiar datos de genética cuantitativa (obligatorio para LMM/GBLUP/PBLUP): subida CSV/Excel, columnas de fenotipo y pedigrí (ID/padre/madre), dry-run, filtros y tabla interactiva. |
+| `/quantitative` | Genética cuantitativa: LMM (REML/ML) y valores de cría BLUP (consume la matriz limpia de Datos). |
+| `/gblup` | Predicción genómica GBLUP con fiabilidad y precisión por individuo (consume la matriz limpia de Datos). |
+| `/pblup` | Predicción por modelo animal PBLUP con matriz A de pedigrí, endogamia F y fiabilidades (consume la matriz limpia de Datos). |
 
 Además, los análisis de larga duración sobre archivos subidos se ejecutan como **trabajos de fondo con progreso en tiempo real**:
 
@@ -698,6 +701,13 @@ lmm = LinearMixedModel()            # auto-detecta CUDA
 resultado = lmm.fit(fenotipos, efectos_fijos, grm)   # REML por defecto
 print(resultado.heritability)
 valores_cria = lmm.blup()
+
+# 8. PBLUP: modelo animal con pedigrí (sire/dam), sin genotipos
+from Genoly import PedigreeBLUP
+pblup = PedigreeBLUP()
+r = pblup.fit_pedigree(fenotipos, X, individuos, padres, madres)
+h2 = r.genetic_variance / (r.genetic_variance + r.residual_variance)
+print(h2, pblup.inbreeding())
 ```
 
 ## Ejemplos
@@ -745,8 +755,8 @@ Hay 161 tests (más 39 subtests) repartidos en 10 ficheros:
 | `test_variant_pipeline.py` | SAM → variantes → VCF y su job |
 | `test_downstream.py` | PCA / KMeans / t-SNE y su job |
 | `test_annotation_report.py` | GFF/GO, SVG de heatmap y volcano, jobs de anotación e informe |
-| `test_quantgen_extra.py` | validación cruzada, GWAS, GRM, MAF/HWE |
-| `test_api.py` | auth `X-API-Key`/`Bearer`/`?api_key=` y `/api/health` pública, 401 en toda la superficie, límites de subida (413/409), registro de rutas (allowlist y LFI) y stream SSE de jobs |
+| `test_quantgen_extra.py` | validación cruzada, GWAS, GRM, MAF/HWE, pedigrí (matriz A, F, A⁻¹), PBLUP (varianzas dadas/REML, equivalencia con GBLUP) |
+| `test_api.py` | auth `X-API-Key`/`Bearer`/`?api_key=` y `/api/health` pública, 401 en toda la superficie, límites de subida (413/409), registro de rutas (allowlist y LFI), stream SSE de jobs y smoke de `/api/pblup/predict` |
 | `test_worker.py` | aislamiento de procesos (raise / segfault / `os._exit`) y spills huérfanos |
 
 `test_streaming.py` verifica la equivalencia exacta entre el pipeline de streaming y el conteo en memoria, la matemática del planificador de VRAM y el ventanado con solape `k-1`.
@@ -935,6 +945,30 @@ print(resultado.variance_source)     # "dadas" o "reml"
 print(gblup.blup(), gblup.accuracies())
 ```
 
+### PedigreeBLUP (PBLUP)
+
+Predicción de valores de cría por modelo animal a partir del pedigrí (columnas sire/dam), sin necesidad de genotipos. Construye la matriz de parentesco aditiva A y la invierte; admite varianzas fijas (solución en un paso) o estimación REML, y devuelve fiabilidades, precisiones y el coeficiente de endogamia F de cada individuo.
+
+| Método | Descripción |
+|---|---|
+| `fit(y, X, A, Z=None, genetic_variance=None, residual_variance=None, ...)` | Ajusta el modelo animal con una matriz A ya construida. Devuelve `PBLUPResult`. |
+| `fit_pedigree(y, X, individuals, sires, dams, ...)` | Construye A desde el pedigrí crudo (reordena y/X topológicamente) y ajusta. |
+| `blup()` / `blue()` | Valores de cría predichos / efectos fijos. |
+| `reliabilities()` / `accuracies()` | Fiabilidad (1 − PEV/Var(u)) y precisión (√fiabilidad) por individuo. |
+| `inbreeding()` | Coeficiente de endogamia F de cada individuo. |
+
+Funciones auxiliares del pedigrí: `normalize_pedigree` (valida y ordena topológicamente), `build_a_matrix` (A y F) y `build_a_inverse` (A⁻¹). El pedigrí se recibe en el **mismo CSV/Excel** que los fenotipos mediante las columnas de padre (sire) y madre (dam), seleccionadas en la página Datos.
+
+```python
+from Genoly import PedigreeBLUP
+
+pblup = PedigreeBLUP()
+resultado = pblup.fit_pedigree(fenotipos, X, individuos, padres, madres,
+                               genetic_variance=0.5, residual_variance=0.9)
+print(resultado.variance_source, resultado.founders)
+print(pblup.blup(), pblup.accuracies(), pblup.inbreeding())
+```
+
 ### Preprocesamiento de CSV/Excel
 
 `prepare_quantitative_data(path)` carga una tabla de fenotipos y genotipos (`.csv`, `.tsv`, `.txt`, `.xlsx` o `.xls`) aplicando la limpieza estándar antes del análisis: detección automática de cabecera y delimitador (coma, punto y coma o tabulador), conversión de decimales con coma, descarte de columnas no numéricas y de filas sin fenotipo, e imputación de dosis perdidas por media o moda.
@@ -985,6 +1019,8 @@ python descargar_datos_test.py
 - [x] Llamada de variantes (SNV/deleciones) en GPU.
 - [x] Genética cuantitativa: modelos lineales mixtos (REML/ML) y BLUP sobre GPU.
 - [x] Predicción genómica GBLUP con fiabilidad y precisión por individuo.
+- [x] Predicción PBLUP por modelo animal (matriz A de pedigrí, endogamia F, REML o varianzas fijas).
+- [x] Flujo obligatorio de limpieza para LMM/GBLUP/PBLUP: dry-run, filtros por columna y tabla interactiva paginada en la página Datos.
 - [x] Carga de tablas CSV/Excel con limpieza e imputación de valores perdidos.
 - [x] Auto-detección de la GPU e instalación automática de PyTorch CUDA.
 - [x] Despliegue en contenedor Docker (API + frontend, CUDA opcional).

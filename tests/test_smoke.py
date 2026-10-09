@@ -631,9 +631,10 @@ class TestPreprocess(unittest.TestCase):
         self.assertGreater(names['m2']['missing_pct'], 0)
         self.assertEqual(names['nota']['type'], 'text')
 
-        pheno, geno, markers, rep = clean_grid(
+        pheno, geno, markers, pedigree, rep = clean_grid(
             grid, phenotype_col=1, impute_method='media',
             max_column_missingness=0.5, min_individuals=5, min_markers=2)
+        self.assertIsNone(pedigree)
         self.assertEqual(rep['final_rows'], 5)
         self.assertEqual(rep['final_markers'], 3)
         self.assertEqual(rep['phenotype_column'], 'feno')

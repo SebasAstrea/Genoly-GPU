@@ -44,6 +44,7 @@ const groups = [
       { to: '/datos', label: 'Datos y limpieza', icon: <IconTag className="h-5 w-5" /> },
       { to: '/quantitative', label: 'Modelos mixtos', icon: <IconChart className="h-5 w-5" /> },
       { to: '/gblup', label: 'GBLUP', icon: <IconTarget className="h-5 w-5" /> },
+      { to: '/pblup', label: 'PBLUP', icon: <IconDna className="h-5 w-5" /> },
     ],
   },
 ]

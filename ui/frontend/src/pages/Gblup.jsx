@@ -1,10 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import { Card, StatCard, Badge, Bar, PageHeader } from '../components/ui.jsx'
-import PreprocessReport from '../components/PreprocessReport.jsx'
-import { makeSampleData, parseQuantData } from '../quantgen.js'
-import { parseFileGrid, preprocessGrid } from '../tabular.js'
-import { useQData, qdataToText } from '../qdata.jsx'
+import { useQData } from '../qdata.jsx'
 import {
   IconTarget,
   IconList,
@@ -16,68 +14,30 @@ import {
   IconPlay,
 } from '../components/icons.jsx'
 
-const SAMPLE = makeSampleData()
-
 export default function Gblup() {
-  const fileInputRef = useRef(null)
-  const [dataText, setDataText] = useState(SAMPLE)
   const { qdata } = useQData()
   const [kinshipMethod, setKinshipMethod] = useState('vanraden')
   const [varGenetic, setVarGenetic] = useState('')
   const [varResidual, setVarResidual] = useState('')
-  const [imputeMethod, setImputeMethod] = useState('media')
   const [maxIter, setMaxIter] = useState(100)
-  const [report, setReport] = useState(null)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  // si hay datos limpios preparados en la página Datos, usarlos
-  useEffect(() => {
-    if (qdata) {
-      setDataText(qdataToText(qdata))
-      setReport({
-        final_rows: qdata.phenotypes.length,
-        final_markers: qdata.genotypes[0]?.length ?? 0,
-        imputed_cells: qdata.report?.imputed_cells ?? 0,
-        source: qdata.source,
-        clean: true,
-      })
-    }
-  }, [qdata])
-
-  const handleFile = async (e) => {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
-    setError(null)
-    setResult(null)
-    try {
-      const grid = await parseFileGrid(file)
-      const out = preprocessGrid(grid, { imputeMethod })
-      setDataText(
-        out.phenotypes
-          .map((p, i) => [p, ...out.genotypes[i]].join(','))
-          .join('\n'),
-      )
-      setReport({ ...out.report, source: file.name })
-    } catch (err) {
-      setReport(null)
-      setError(err.message)
-    }
-  }
+  const hasMarkers = (qdata?.genotypes?.[0]?.length ?? 0) > 0
+  const individuals = qdata?.pedigree?.individuals ?? null
 
   const run = async () => {
     setLoading(true)
     setError(null)
     try {
-      const { phenotypes, genotypes } = parseQuantData(dataText)
       const payload = {
-        phenotypes,
-        genotypes,
+        phenotypes: qdata.phenotypes,
+        genotypes: qdata.genotypes,
         kinship_method: kinshipMethod,
         max_iter: maxIter,
       }
+      if (individuals) payload.individuals = individuals
       if (varGenetic !== '' || varResidual !== '') {
         const g = Number(varGenetic)
         const e = Number(varResidual)
@@ -121,108 +81,112 @@ export default function Gblup() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="space-y-4">
-          <Card title="Datos de entrada" icon={<IconList className="h-5 w-5" />}>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="label">Individuos — formato: fenotipo,dosis_1,dosis_2,…</span>
-              {qdata && <Badge tone="ok">Datos: {qdata.source}</Badge>}
-            </div>
-            <textarea
-              className="input h-72 font-mono"
-              value={dataText}
-              onChange={(e) => setDataText(e.target.value)}
-              spellCheck={false}
-            />
-            <div className="mt-2 flex gap-2">
-              <button
-                type="button"
-                className="btn-ghost flex-1"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                Cargar CSV / Excel
-              </button>
-              <select
-                className="input !w-36"
-                value={imputeMethod}
-                onChange={(e) => setImputeMethod(e.target.value)}
-                title="Imputación de valores perdidos al cargar archivos"
-              >
-                <option value="media">Imputar media</option>
-                <option value="moda">Imputar moda</option>
-              </select>
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.tsv,.txt,.xlsx,.xls"
-              className="hidden"
-              onChange={handleFile}
-            />
-            {report && (
-              <div className="mt-3">
-                <PreprocessReport report={report} />
-              </div>
-            )}
-            <p className="mt-2 text-xs text-ink-faint">
-              Mismo formato que en Genética cuantitativa. Las celdas vacías se imputan.
-            </p>
-          </Card>
+          {!qdata && (
+            <Card title="Datos requeridos" icon={<IconList className="h-5 w-5" />}>
+              <p className="text-sm text-ink-dim">
+                GBLUP trabaja sobre la matriz limpia preparada en la página de
+                Datos (obligatorio para todo el módulo de genética cuantitativa).
+              </p>
+              <Link className="btn-primary mt-3 w-full" to="/datos">
+                Ir a Datos y limpieza
+              </Link>
+            </Card>
+          )}
 
-          <Card title="Parámetros" icon={<IconCog className="h-5 w-5" />}>
-            <div>
-              <label className="label">Parentesco</label>
-              <select
-                className="input"
-                value={kinshipMethod}
-                onChange={(e) => setKinshipMethod(e.target.value)}
-              >
-                <option value="vanraden">VanRaden</option>
-                <option value="gcta">GCTA</option>
-              </select>
-            </div>
+          {qdata && !hasMarkers && (
+            <Card title="Sin marcadores" icon={<IconTarget className="h-5 w-5" />}>
+              <p className="text-sm text-ink-dim">
+                La matriz limpia no tiene marcadores genéticos (sólo pedigrí).
+                GBLUP necesita dosis alélicas; para pedigrí sin genotipos usa
+                PBLUP.
+              </p>
+              <Link className="btn-primary mt-3 w-full" to="/pblup">
+                Ir a PBLUP
+              </Link>
+            </Card>
+          )}
 
-            <div className="mt-3 grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">σ² genética</label>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  placeholder="REML"
-                  className="input"
-                  value={varGenetic}
-                  onChange={(e) => setVarGenetic(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">σ² residual</label>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  placeholder="REML"
-                  className="input"
-                  value={varResidual}
-                  onChange={(e) => setVarResidual(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="label">Máx. iteraciones</label>
-                <input
-                  type="number"
-                  min={10}
-                  max={1000}
-                  className="input"
-                  value={maxIter}
-                  onChange={(e) => setMaxIter(Number(e.target.value))}
-                />
-              </div>
-            </div>
+          {qdata && hasMarkers && (
+            <>
+              <Card title="Datos de entrada" icon={<IconList className="h-5 w-5" />}>
+                <div className="flex items-center justify-between">
+                  <span className="label">Matriz limpia de la sesión</span>
+                  <Badge tone="ok">Datos: {qdata.source}</Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <dt className="text-ink-faint">Individuos</dt>
+                    <dd className="font-mono text-accent-glow">{qdata.phenotypes.length}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-ink-faint">Marcadores</dt>
+                    <dd className="font-mono text-accent-glow">{qdata.genotypes[0]?.length ?? 0}</dd>
+                  </div>
+                </div>
+                <p className="mt-2 text-xs text-ink-faint">
+                  Los datos se cargan desde la limpieza de Datos. Para cambiar
+                  opciones de limpieza o filtros, vuelve allí.
+                </p>
+              </Card>
 
-            <button className="group btn-primary mt-3 w-full" onClick={run} disabled={loading}>
-              <IconPlay className="h-4 w-4 transition-transform duration-300 group-hover:scale-125" />
-              {loading ? 'Prediciendo…' : 'Predecir valores de cría'}
-            </button>
-          </Card>
+              <Card title="Parámetros" icon={<IconCog className="h-5 w-5" />}>
+                <div>
+                  <label className="label">Parentesco</label>
+                  <select
+                    className="input"
+                    value={kinshipMethod}
+                    onChange={(e) => setKinshipMethod(e.target.value)}
+                  >
+                    <option value="vanraden">VanRaden</option>
+                    <option value="gcta">GCTA</option>
+                  </select>
+                </div>
+
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="label">σ² genética</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="REML"
+                      className="input"
+                      value={varGenetic}
+                      onChange={(e) => setVarGenetic(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="label">σ² residual</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      placeholder="REML"
+                      className="input"
+                      value={varResidual}
+                      onChange={(e) => setVarResidual(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="label">Máx. iteraciones</label>
+                    <input
+                      type="number"
+                      min={10}
+                      max={1000}
+                      className="input"
+                      value={maxIter}
+                      onChange={(e) => setMaxIter(Number(e.target.value))}
+                    />
+                  </div>
+                </div>
+
+                <button className="group btn-primary mt-3 w-full" onClick={run} disabled={loading}>
+                  <IconPlay className="h-4 w-4 transition-transform duration-300 group-hover:scale-125" />
+                  {loading ? 'Prediciendo…' : 'Predecir valores de cría'}
+                </button>
+              </Card>
+            </>
+          )}
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -273,8 +237,14 @@ export default function Gblup() {
                     <tbody>
                       {blupTop.map((b) => (
                         <tr key={b.individual}>
-                          <td className="text-ink-faint">{b.individual}</td>
-                          <td className="font-mono">IND-{String(b.individual).padStart(4, '0')}</td>
+                          <td className="text-ink-faint">
+                            {typeof b.individual === 'number' ? b.individual : ''}
+                          </td>
+                          <td className="font-mono">
+                            {typeof b.individual === 'number'
+                              ? `IND-${String(b.individual).padStart(4, '0')}`
+                              : b.individual}
+                          </td>
                           <td className="text-right font-mono text-accent-glow">
                             {b.value.toFixed(4)}
                           </td>
@@ -295,7 +265,7 @@ export default function Gblup() {
             </>
           )}
 
-          {!result && !error && (
+          {!result && !error && qdata && hasMarkers && (
             <Card title="Ayuda" icon={<IconTarget className="h-5 w-5" />}>
               <p className="text-sm text-ink-faint">
                 GBLUP resuelve el modelo animal en un solo paso y calcula la fiabilidad de cada

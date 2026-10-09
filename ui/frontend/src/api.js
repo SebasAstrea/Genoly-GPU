@@ -108,10 +108,19 @@ export const api = {
 
   qdataGet: (cleanId) => request(`/qdata/${cleanId}`),
 
-  qdataGridFull: (uploadId, maxRows = null) =>
-    request(`/qdata/${encodeURIComponent(uploadId)}/grid-full`, {
+  qdataPreviewClean: (payload) =>
+    request('/qdata/preview-clean', { method: 'POST', body: JSON.stringify(payload) }),
+
+  qdataGridPage: (uploadId, { offset = 0, limit = 500, filters = {} } = {}) =>
+    request(`/qdata/${encodeURIComponent(uploadId)}/grid-page`, {
       method: 'POST',
-      body: JSON.stringify({ upload_id: uploadId, max_rows: maxRows }),
+      body: JSON.stringify({ upload_id: uploadId, offset, limit, filters }),
+    }),
+
+  qdataColumnValues: (uploadId, col, filters = {}) =>
+    request(`/qdata/${encodeURIComponent(uploadId)}/column-values`, {
+      method: 'POST',
+      body: JSON.stringify({ upload_id: uploadId, col, filters }),
     }),
 
   qdataApplyFilters: (payload) =>
@@ -170,4 +179,7 @@ export const api = {
 
   predictGblup: (payload) =>
     request('/gblup/predict', { method: 'POST', body: JSON.stringify(payload) }),
+
+  predictPblup: (payload) =>
+    request('/pblup/predict', { method: 'POST', body: JSON.stringify(payload) }),
 }

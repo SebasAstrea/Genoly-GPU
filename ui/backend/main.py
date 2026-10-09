@@ -45,6 +45,7 @@ from ui.backend.routers import (
     gblup,
     jobs,
     kmer,
+    pblup,
     qc,
     qdata,
     quantitative,
@@ -147,6 +148,7 @@ app.include_router(kmer.router)
 app.include_router(variants.router)
 app.include_router(quantitative.router)
 app.include_router(gblup.router)
+app.include_router(pblup.router)
 app.include_router(upload.router)
 app.include_router(jobs.router)
 app.include_router(dataset.router)

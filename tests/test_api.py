@@ -294,5 +294,65 @@ class RegistryTest(unittest.TestCase):
         self.assertIsNone(uploads.get_upload(upload_id))
 
 
+class PblupApiTest(unittest.TestCase):
+    """Smoke test del endpoint PBLUP."""
+
+    def test_predict_con_pedigree(self):
+        payload = {
+            "phenotypes": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            "individuals": ["A1", "A2", "A3", "A4", "A5", "A6"],
+            "sires": [None, None, "A1", "A1", "A2", "A3"],
+            "dams": [None, None, "A4", "A5", None, None],
+            "genetic_variance": 1.0,
+            "residual_variance": 1.0,
+        }
+        r = client.post("/api/pblup/predict", json=payload)
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["n_individuals"], 6)
+        self.assertEqual(body["variance_source"], "dadas")
+        self.assertEqual(len(body["blup"]), 6)
+        for b in body["blup"]:
+            self.assertIn("individual", b)
+            self.assertIn("value", b)
+            self.assertIn("reliability", b)
+            self.assertIn("accuracy", b)
+            self.assertIn("inbreeding", b)
+            self.assertGreaterEqual(b["reliability"], 0.0)
+            self.assertLessEqual(b["reliability"], 1.0)
+
+    def test_longitudes_incoherentes_400(self):
+        r = client.post("/api/pblup/predict", json={
+            "phenotypes": [1.0] * 5,
+            "individuals": ["A", "B", "C", "D", "E"],
+            "sires": [None],
+            "dams": [None] * 5,
+            "genetic_variance": 1.0, "residual_variance": 1.0,
+        })
+        self.assertEqual(r.status_code, 400)
+
+    def test_ciclo_400(self):
+        r = client.post("/api/pblup/predict", json={
+            "phenotypes": [1.0] * 5,
+            "individuals": ["A", "B", "C", "D", "E"],
+            "sires": ["B", "C", "D", "E", "A"],
+            "dams": [None] * 5,
+            "genetic_variance": 1.0, "residual_variance": 1.0,
+        })
+        self.assertEqual(r.status_code, 400)
+
+    def test_gblup_acepta_individuals(self):
+        r = client.post("/api/gblup/predict", json={
+            "phenotypes": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "genotypes": [[0, 1, 2], [1, 1, 0], [2, 0, 1],
+                          [0, 2, 1], [1, 0, 2]],
+            "individuals": ["X1", "X2", "X3", "X4", "X5"],
+            "genetic_variance": 1.0, "residual_variance": 1.0,
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        ids = [b["individual"] for b in r.json()["blup"]]
+        self.assertEqual(ids, ["X1", "X2", "X3", "X4", "X5"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

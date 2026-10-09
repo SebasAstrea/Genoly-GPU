@@ -337,100 +337,128 @@ def _run_report(spec: dict, progress) -> dict:
     return out
 
 
-def _run_qdata_clean(spec: dict, progress) -> dict:
-    """Limpia/imputa/filtra una matriz CSV/Excel sucia y guarda el JSON."""
+def _clean_options(spec: dict) -> dict:
+    """Opciones comunes de clean_grid del spec del trabajo."""
+    return {
+        "phenotype_col": spec["phenotype_col"],
+        "impute_method": spec["impute_method"],
+        "max_column_missingness": spec["max_column_missingness"],
+        "min_individuals": spec["min_individuals"],
+        "min_markers": spec["min_markers"],
+        "min_maf": spec.get("min_maf", 0.0),
+        "hwe_p": spec.get("hwe_p"),
+        "id_col": spec.get("id_col"),
+        "sire_col": spec.get("sire_col"),
+        "dam_col": spec.get("dam_col"),
+    }
+
+
+def _write_clean_payload(phenotypes, genotypes, markers, pedigree, report,
+                         spec) -> dict:
+    """Serializa el resultado de clean_grid y actualiza las métricas."""
     import json
     import os
 
-    from Genoly.quantitative.preprocess import clean_grid, load_grid
     from ui.backend.uploads import set_bytes, set_stats
+
+    payload = {
+        "phenotypes": phenotypes,
+        "genotypes": genotypes,
+        "markers": markers,
+        "pedigree": pedigree,
+        "report": report,
+    }
+    with open(spec["out_path"], "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+    out_id = spec.get("out_upload_id")
+    if out_id:
+        try:
+            set_bytes(out_id, int(os.path.getsize(spec["out_path"])))
+            set_stats(out_id, len(phenotypes),
+                      len(phenotypes) * len(markers), None)
+        except Exception as exc:
+            logger.warning("No se pudieron guardar las métricas: %s", exc)
+
+    return {"report": report, "clean_id": out_id,
+            "n_individuals": len(phenotypes), "n_markers": len(markers)}
+
+
+def _run_qdata_clean(spec: dict, progress) -> dict:
+    """Limpia/imputa/filtra una matriz CSV/Excel sucia y guarda el JSON."""
+    from Genoly.quantitative.preprocess import clean_grid, load_grid
 
     progress({"stage": "load"})
     grid = load_grid(spec["path"])
     progress({"stage": "load", "rows": len(grid)})
 
-    phenotypes, genotypes, markers, report = clean_grid(
-        grid,
-        phenotype_col=spec["phenotype_col"],
-        impute_method=spec["impute_method"],
-        max_column_missingness=spec["max_column_missingness"],
-        min_individuals=spec["min_individuals"],
-        min_markers=spec["min_markers"],
-        min_maf=spec.get("min_maf", 0.0),
-        hwe_p=spec.get("hwe_p"),
-    )
+    phenotypes, genotypes, markers, pedigree, report = clean_grid(
+        grid, **_clean_options(spec))
     progress({"stage": "clean", "rows": len(phenotypes),
               "markers": len(markers)})
 
-    payload = {
-        "phenotypes": phenotypes,
-        "genotypes": genotypes,
-        "markers": markers,
-        "report": report,
-    }
-    with open(spec["out_path"], "w", encoding="utf-8") as fh:
-        json.dump(payload, fh)
+    return _write_clean_payload(phenotypes, genotypes, markers, pedigree,
+                                report, spec)
 
-    out_id = spec.get("out_upload_id")
-    if out_id:
-        try:
-            set_bytes(out_id, int(os.path.getsize(spec["out_path"])))
-            set_stats(out_id, len(phenotypes),
-                      len(phenotypes) * len(markers), None)
-        except Exception as exc:
-            logger.warning("No se pudieron guardar las métricas: %s", exc)
 
-    return {"report": report, "clean_id": out_id,
-            "n_individuals": len(phenotypes), "n_markers": len(markers)}
+_MISSING_CELL = {"", "na", "nan", "null", "none", "-", "nd"}
+
+
+def _cell_missing(value) -> bool:
+    if value is None:
+        return True
+    return str(value).strip().lower() in _MISSING_CELL
+
+
+def _passes_filters(row, filters: dict) -> bool:
+    """Semántica del filtrado por definición (equivalente a FiltableGrid)."""
+    for key, f in filters.items():
+        col = int(key)
+        raw = row[col] if col < len(row) else None
+        if _cell_missing(raw):
+            if not f.get("vacios", True):
+                return False
+        else:
+            allowed = f.get("vals")
+            if allowed is not None and str(raw).strip() not in set(allowed):
+                return False
+    return True
 
 
 def _run_apply_filters(spec: dict, progress) -> dict:
-    """Limpia/imputa/filtra una grid ya filtrada por el cliente (frontend)."""
-    import json
-    import os
-
-    from Genoly.quantitative.preprocess import clean_grid
-    from ui.backend.uploads import set_bytes, set_stats
+    """Filtra por definición/ediciones y limpia la grid en el servidor."""
+    from Genoly.quantitative.preprocess import clean_grid, load_grid
 
     progress({"stage": "load"})
-    # spec["grid_rows"] viene del frontend: lista de listas tras filtrado interactivo
-    grid = [list(row) for row in spec.get("grid_rows", [])]
+    full = load_grid(spec["path"])
+    header = full[0] if (spec.get("header") and full) else None
+    grid = full[1:] if header is not None else full
+    progress({"stage": "load", "rows": len(grid)})
+
+    filters = spec.get("filters") or {}
+    if filters:
+        grid = [row for row in grid if _passes_filters(row, filters)]
     if not grid:
         raise ValueError("La grid está vacía — ninguna fila sobrevivió al filtro")
 
-    phenotypes, genotypes, markers, report = clean_grid(
-        grid,
-        phenotype_col=spec["phenotype_col"],
-        impute_method=spec.get("impute_method", "media"),
-        max_column_missingness=spec.get("max_column_missingness", 1.0),
-        min_individuals=spec.get("min_individuals", 5),
-        min_markers=spec.get("min_markers", 2),
-        min_maf=spec.get("min_maf", 0.0),
-        hwe_p=spec.get("hwe_p"),
-    )
+    offset = 1 if header is not None else 0
+    for edit in spec.get("edits") or []:
+        r, c = int(edit["row"]) + offset, int(edit["col"])
+        if 0 <= r < len(grid):
+            while len(grid[r]) <= c:
+                grid[r].append("")
+            grid[r][c] = str(edit.get("value", "")).strip()
+
+    if header is not None:
+        grid = [header] + grid
+    progress({"stage": "filter", "rows": len(grid)})
+    phenotypes, genotypes, markers, pedigree, report = clean_grid(
+        grid, **_clean_options(spec))
     progress({"stage": "clean", "rows": len(phenotypes),
               "markers": len(markers)})
 
-    payload = {
-        "phenotypes": phenotypes,
-        "genotypes": genotypes,
-        "markers": markers,
-        "report": report,
-    }
-    with open(spec["out_path"], "w", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-
-    out_id = spec.get("out_upload_id")
-    if out_id:
-        try:
-            set_bytes(out_id, int(os.path.getsize(spec["out_path"])))
-            set_stats(out_id, len(phenotypes),
-                      len(phenotypes) * len(markers), None)
-        except Exception as exc:
-            logger.warning("No se pudieron guardar las métricas: %s", exc)
-
-    return {"report": report, "clean_id": out_id,
-            "n_individuals": len(phenotypes), "n_markers": len(markers)}
+    return _write_clean_payload(phenotypes, genotypes, markers, pedigree,
+                                report, spec)
 
 
 def _run_crossval(spec: dict, progress) -> dict:

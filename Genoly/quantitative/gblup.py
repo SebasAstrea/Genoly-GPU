@@ -1,13 +1,10 @@
 """
 GBLUP: predicción genómica de valores de cría acelerada por GPU.
 
-Dados las componentes de varianza (fijadas por el usuario o estimadas por
-REML), resuelve el modelo mixto en un solo paso y calcula la fiabilidad de
-cada valor de cría a partir del error de predicción (PEV):
-
-    û = σ_g² K Z' V⁻¹ (y - Xβ̂),   V = σ_g² Z K Z' + σ_e² I
-    PEV(u) = σ_g² K - σ_g⁴ K Z' P Z K
-    fiabilidad_i = 1 - PEV_i / (σ_g² K_ii)
+Fachada sobre el núcleo BLUP compartido (``blup.fit_blup``) con matriz de
+parentesco genómica (GRM). La matemática, el cálculo de fiabilidades y la
+estimación REML viven en ``Genoly.quantitative.blup``; aquí sólo se
+empaqueta el resultado con la API histórica de GBLUP.
 """
 
 from dataclasses import dataclass
@@ -16,8 +13,7 @@ from typing import Optional
 import torch
 
 from Genoly.core.device import DeviceManager
-from Genoly.quantitative.reml import solve_variance_components
-from Genoly.quantitative.utils import cholesky_regularized, prepare_model_inputs
+from Genoly.quantitative.blup import fit_blup
 
 __all__ = ['GBLUPResult', 'GenomicBLUP']
 
@@ -94,68 +90,23 @@ class GenomicBLUP:
             ValueError: Si se proporciona una sola varianza o las formas no
                         son consistentes.
         """
-        given = (genetic_variance is not None, residual_variance is not None)
-        if any(given) and not all(given):
-            raise ValueError(
-                "Proporciona ambas varianzas (genética y residual) o ninguna "
-                "para estimarlas por REML"
-            )
-
-        y_t, X_t, K_t, Z_t = prepare_model_inputs(
-            y, X, K, Z, device=self.device, dtype=self.dtype)
-
-        loglik = None
-        if genetic_variance is None:
-            est = solve_variance_components(y_t, X_t, K_t, Z_t,
-                                            method="reml",
-                                            max_iter=max_iter,
-                                            tol=tol)
-            var_g = est.genetic_variance
-            var_e = est.residual_variance
-            loglik = est.log_likelihood
-            source = "reml"
-        else:
-            var_g = float(genetic_variance)
-            var_e = float(residual_variance)
-            source = "dadas"
-
-        n = y_t.shape[0]
-        q = K_t.shape[0]
-        eye_n = torch.eye(n, dtype=self.dtype, device=self.device)
-
-        V = var_g * (Z_t @ K_t @ Z_t.T) + var_e * eye_n
-        L = cholesky_regularized(V)
-        Vinv = torch.cholesky_solve(eye_n, L)
-        Vinv_X = Vinv @ X_t
-        XtViX = X_t.T @ Vinv_X
-        L_fix = cholesky_regularized(XtViX)
-        beta = torch.cholesky_solve(X_t.T @ (Vinv @ y_t.unsqueeze(1)),
-                                    L_fix).reshape(-1)
-        resid = y_t.unsqueeze(1) - X_t @ beta.unsqueeze(1)
-        breeding_values = var_g * (K_t @ (Z_t.T @ (Vinv @ resid))).reshape(-1)
-
-        proj = Vinv - Vinv_X @ torch.cholesky_solve(Vinv_X.T, L_fix)
-        kz = K_t @ Z_t.T
-        if var_g > 0.0:
-            pev = var_g * torch.diagonal(K_t) \
-                - var_g ** 2 * torch.diagonal(kz @ proj @ Z_t @ K_t)
-            k_diag = torch.diagonal(K_t).clamp(min=1e-12)
-            reliability = (1.0 - pev / (var_g * k_diag)).clamp(0.0, 1.0)
-        else:
-            reliability = torch.zeros(q, dtype=self.dtype, device=self.device)
-
+        core, X_cpu, Z_cpu = fit_blup(
+            y, X, K, Z,
+            genetic_variance=genetic_variance,
+            residual_variance=residual_variance,
+            max_iter=max_iter, tol=tol,
+            device=self.device, dtype=self.dtype)
         self.result_ = GBLUPResult(
-            breeding_values=breeding_values.detach().cpu(),
-            fixed_effects=beta.detach().cpu(),
-            reliabilities=reliability.detach().cpu(),
-            genetic_variance=float(var_g),
-            residual_variance=float(var_e),
-            log_likelihood=loglik,
-            variance_source=source,
+            breeding_values=core.breeding_values,
+            fixed_effects=core.fixed_effects,
+            reliabilities=core.reliabilities,
+            genetic_variance=core.genetic_variance,
+            residual_variance=core.residual_variance,
+            log_likelihood=core.log_likelihood,
+            variance_source=core.variance_source,
         )
-        self._X_cpu = X_t.detach().cpu()
-        self._Z_cpu = Z_t.detach().cpu()
-        self.manager.empty_cache()
+        self._X_cpu = X_cpu
+        self._Z_cpu = Z_cpu
         return self.result_
 
     def _require_fitted(self) -> None:
