@@ -89,6 +89,15 @@ export const api = {
   callVariantsFile: (payload) =>
     request('/variants/call-file', { method: 'POST', body: JSON.stringify(payload) }),
 
+  gatkCallFile: (payload) =>
+    request('/gatk/call-file', { method: 'POST', body: JSON.stringify(payload) }),
+
+  gatkBqsr: (payload) =>
+    request('/gatk/bqsr', { method: 'POST', body: JSON.stringify(payload) }),
+
+  gatkMarkdups: (payload) =>
+    request('/gatk/markdups', { method: 'POST', body: JSON.stringify(payload) }),
+
   runDownstream: (payload) =>
     request('/downstream', { method: 'POST', body: JSON.stringify(payload) }),
 

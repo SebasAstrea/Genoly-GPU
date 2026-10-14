@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "genoly-gpu"
-version = "0.2.0"
+version = "0.3.0"
 description = "Software de aceleracion por GPU (NVIDIA/CUDA) para el analisis de grandes datos del genoma"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -3,7 +3,7 @@ Genoly-GPU: software de aceleración por GPU (NVIDIA/CUDA) para el
 análisis de grandes datos del genoma.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from Genoly.core.device import DeviceManager, GPUInfo, get_device
 from Genoly.core.gpu_setup import GpuSetup, NvidiaSystemInfo, recommend_cuda_tag
@@ -13,6 +13,21 @@ from Genoly.core.vram import (
     estimate_kmer_bytes_per_base,
 )
 from Genoly.encoding.encoder import SequenceEncoder, encode_to_tensor
+from Genoly.gatk import (
+    BaseRecalibrator,
+    GATKRead,
+    GATKVariant,
+    HaplotypeCaller,
+    RecalTable,
+    apply_duplicate_flags,
+    apply_recalibration,
+    filter_reads,
+    mark_duplicates,
+    pairhmm_log10,
+    reads_from_sam,
+    write_gatk_vcf,
+    write_recal_sam,
+)
 from Genoly.io.fasta import (
     FastaReader,
     FastaRecord,
@@ -84,4 +99,17 @@ __all__ = [
     'estimate_variance_components',
     'PreprocessReport',
     'prepare_quantitative_data',
+    'HaplotypeCaller',
+    'GATKVariant',
+    'GATKRead',
+    'BaseRecalibrator',
+    'RecalTable',
+    'pairhmm_log10',
+    'filter_reads',
+    'reads_from_sam',
+    'mark_duplicates',
+    'apply_duplicate_flags',
+    'apply_recalibration',
+    'write_gatk_vcf',
+    'write_recal_sam',
 ]

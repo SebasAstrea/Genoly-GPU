@@ -268,6 +268,225 @@ def _run_variant_call(spec: dict, progress) -> dict:
     }
 
 
+def _run_haplotype(spec: dict, progress) -> dict:
+    """Llamada de variantes estilo GATK HaplotypeCaller (regiones
+    activas + ensamblaje local + PairHMM + genotipado PL/GQ)."""
+    import os
+
+    from Genoly.gatk.genotyper import HaplotypeCaller
+    from Genoly.gatk.vcf import write_gatk_vcf
+    from ui.backend.uploads import set_bytes, set_stats
+
+    caller = HaplotypeCaller(
+        min_mapq=spec.get("min_mapq", 20),
+        min_depth=spec.get("min_depth", 5),
+        min_qual=spec.get("min_qual", 10.0),
+        min_af=spec.get("min_af", 0.15),
+        window=spec.get("window", 50),
+        extension=spec.get("extension", 50),
+        max_haplotypes=spec.get("max_haplotypes", 32),
+        ploidy=spec.get("ploidy", 2),
+    )
+    result = caller.call_from_sam(
+        spec["sam_path"], spec["ref_path"],
+        region_size=spec.get("region_size", 50_000_000),
+        sample_name=spec.get("sample_name", "SAMPLE"),
+        on_progress=progress)
+
+    out_vcf = spec.get("out_vcf_path")
+    out_id = spec.get("out_vcf_upload_id")
+    if out_vcf:
+        write_gatk_vcf(out_vcf, result["by_sequence"],
+                       result["sequences"],
+                       sample=result["sample_name"])
+        if out_id:
+            try:
+                set_bytes(out_id, int(os.path.getsize(out_vcf)))
+                set_stats(out_id, result["total_variants"], 0, None)
+            except Exception as exc:
+                logger.warning("No se pudieron guardar las métricas: %s",
+                               exc)
+
+    sample = []
+    for name, variants in result["by_sequence"].items():
+        for v in variants[:200]:
+            sample.append({
+                "sequence": name, "position": v.position, "ref": v.ref,
+                "alt": v.alt, "type": v.type, "qual": v.qual,
+                "filter": v.filter, "gt": v.gt, "dp": v.dp,
+                "ad": v.ad, "gq": v.gq, "pl": v.pl,
+                "af": v.af,
+            })
+        if len(sample) >= 500:
+            break
+
+    return {
+        "total_variants": result["total_variants"],
+        "snvs": result["snvs"],
+        "indels": result["indels"],
+        "pass_variants": result["pass_variants"],
+        "sequences": result["sequences"],
+        "sample_name": result["sample_name"],
+        "vcf_upload_id": out_id,
+        "sample": sample[:500],
+        "pairhmm_backend": _pairhmm_backend(),
+    }
+
+
+def _pairhmm_backend() -> str:
+    """Backend real del PairHMM en este proceso (para telemetría)."""
+    try:
+        from Genoly.gatk.pairhmm import has_native
+        return "native (C)" if has_native() else "torch (GPU/CPU)"
+    except Exception:
+        return "desconocido"
+
+
+def _run_bqsr(spec: dict, progress) -> dict:
+    """Base Quality Score Recalibration (GATK BaseRecalibrator + apply)."""
+    import json
+    import os
+
+    from Genoly.gatk.bqsr import (
+        BaseRecalibrator,
+        RecalTable,
+        apply_recalibration,
+        write_recal_sam,
+    )
+    from Genoly.gatk.reads import reads_from_sam
+    from Genoly.io.fasta import FastaReader
+    from ui.backend.uploads import set_bytes, set_stats
+
+    refs = {rec.id: rec.sequence.upper()
+            for rec in FastaReader(spec["ref_path"]).records()}
+    reads = reads_from_sam(spec["sam_path"])
+    if not reads:
+        raise ValueError("el SAM/BAM no contiene lecturas mapeadas")
+
+    progress({"stage": "bqsr_estimate", "reads": len(reads)})
+    recal = BaseRecalibrator(
+        min_base_quality=spec.get("min_base_quality", 0),
+        min_mapq=spec.get("min_mapq", 0))
+
+    by_ref: dict = {}
+    for r in reads:
+        by_ref.setdefault(r.rname, []).append(r)
+
+    global_table = RecalTable()
+
+    # los eventos del estimador se reetiquetan para la UI (estimación)
+    def est_progress(p: dict) -> None:
+        progress({"stage": "bqsr_estimate", **p})
+
+    for name, subset in by_ref.items():
+        ref = refs.get(name)
+        if ref is None:
+            continue
+        table = recal.estimate(ref, subset, on_progress=est_progress)
+        for key, (obs, err) in table.counts.items():
+            slot = global_table.counts.setdefault(key, [0, 0])
+            slot[0] += obs
+            slot[1] += err
+        global_table.n_bases += table.n_bases
+        global_table.n_errors += table.n_errors
+        global_table.max_cycle = max(global_table.max_cycle,
+                                     table.max_cycle)
+
+    deltas = [global_table.empirical_quality(*key) - key[0]
+              for key in global_table.counts]
+
+    out_sam = spec.get("out_sam_path")
+    out_sam_id = spec.get("out_sam_upload_id")
+    if out_sam:
+        recal_reads = apply_recalibration(reads, global_table)
+        ref_lengths = {name: len(refs[name]) for name in by_ref
+                       if name in refs}
+        write_recal_sam(out_sam, recal_reads, ref_lengths,
+                        sample=spec.get("sample_name", "SAMPLE"))
+        if out_sam_id:
+            try:
+                set_bytes(out_sam_id, int(os.path.getsize(out_sam)))
+                set_stats(out_sam_id, len(recal_reads), 0, None)
+            except Exception as exc:
+                logger.warning("No se pudieron guardar las métricas: %s",
+                               exc)
+
+    payload = {
+        "reads": len(reads),
+        "bases": global_table.n_bases,
+        "errors": global_table.n_errors,
+        "global_rate": round(global_table.global_rate, 6),
+        "covariates": len(global_table.counts),
+        "mean_delta": round(sum(deltas) / len(deltas), 3) if deltas else 0.0,
+        "table": global_table.to_dict(),
+    }
+    out_table = spec.get("out_table_path")
+    table_id = spec.get("out_table_upload_id")
+    if out_table:
+        with open(out_table, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=1)
+        if table_id:
+            try:
+                set_bytes(table_id, int(os.path.getsize(out_table)))
+                set_stats(table_id, 1, 0, None)
+            except Exception as exc:
+                logger.warning("No se pudieron guardar las métricas: %s",
+                               exc)
+
+    return {
+        "reads": payload["reads"],
+        "bases": payload["bases"],
+        "errors": payload["errors"],
+        "global_rate": payload["global_rate"],
+        "covariates": payload["covariates"],
+        "mean_delta": payload["mean_delta"],
+        "table_upload_id": table_id,
+        "sam_upload_id": out_sam_id,
+    }
+
+
+def _run_markdups(spec: dict, progress) -> dict:
+    """Marcado de duplicados estilo GATK MarkDuplicates."""
+    import os
+
+    from Genoly.gatk.bqsr import write_recal_sam
+    from Genoly.gatk.markdups import apply_duplicate_flags, mark_duplicates
+    from Genoly.gatk.reads import reads_from_sam
+    from ui.backend.uploads import set_bytes, set_stats
+
+    reads = reads_from_sam(spec["sam_path"])
+    progress({"stage": "markdups", "reads": len(reads)})
+    stats = mark_duplicates(reads)
+    marked = set(stats["qnames"])
+
+    out_sam = spec.get("out_sam_path")
+    out_id = spec.get("out_sam_upload_id")
+    if out_sam:
+        flagged = apply_duplicate_flags(reads, marked)
+        refs: dict = {}
+        for r in reads:
+            if r.rname:
+                refs[r.rname] = max(refs.get(r.rname, 0),
+                                    r.start + len(r.sequence))
+        write_recal_sam(out_sam, flagged, refs,
+                        sample=spec.get("sample_name", "SAMPLE"))
+        if out_id:
+            try:
+                set_bytes(out_id, int(os.path.getsize(out_sam)))
+                set_stats(out_id, len(flagged), 0, None)
+            except Exception as exc:
+                logger.warning("No se pudieron guardar las métricas: %s",
+                               exc)
+
+    return {
+        "total_reads": stats["total"],
+        "duplicates": stats["duplicates"],
+        "duplicate_rate": round(stats["duplicate_rate"], 4),
+        "keys": stats["libraries"],
+        "sam_upload_id": out_id,
+    }
+
+
 def _run_downstream(spec: dict, progress) -> dict:
     """PCA / t-SNE / K-Means sobre una matriz de rasgos (genotipos, etc.)."""
     from Genoly.downstream.reduction import DownstreamAnalyzer
@@ -522,6 +741,12 @@ def run_job(spec: dict, conn: "mp.connection.Connection") -> None:
             result = _run_map(spec, _progress(conn))
         elif kind == "variant_call":
             result = _run_variant_call(spec, _progress(conn))
+        elif kind == "haplotype":
+            result = _run_haplotype(spec, _progress(conn))
+        elif kind == "bqsr":
+            result = _run_bqsr(spec, _progress(conn))
+        elif kind == "markdups":
+            result = _run_markdups(spec, _progress(conn))
         elif kind == "downstream":
             result = _run_downstream(spec, _progress(conn))
         elif kind == "annotation":

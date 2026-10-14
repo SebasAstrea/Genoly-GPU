@@ -12,6 +12,7 @@ import Annotation from './pages/Annotation.jsx'
 import Report from './pages/Report.jsx'
 import Datos from './pages/Datos.jsx'
 import Variants from './pages/Variants.jsx'
+import Gatk from './pages/Gatk.jsx'
 import Quantitative from './pages/Quantitative.jsx'
 import Gblup from './pages/Gblup.jsx'
 import Pblup from './pages/Pblup.jsx'
@@ -32,6 +33,7 @@ export default function App() {
           <Route path="/report" element={<Report />} />
           <Route path="/datos" element={<Datos />} />
           <Route path="/variants" element={<Variants />} />
+          <Route path="/gatk" element={<Gatk />} />
           <Route path="/quantitative" element={<Quantitative />} />
           <Route path="/gblup" element={<Gblup />} />
           <Route path="/pblup" element={<Pblup />} />

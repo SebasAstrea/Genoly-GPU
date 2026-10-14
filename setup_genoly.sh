@@ -141,7 +141,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="genoly-gpu",
-    version="0.2.0",
+    version="0.3.0",
     author="Genoly-GPU",
     author_email="sebasdeasturias@gmail.com",
     description="Software de aceleracion por GPU (NVIDIA/CUDA) para el analisis de grandes datos del genoma",

@@ -33,6 +33,7 @@ class SamRead:
     cigar: Optional[str]
     seq: str
     qual: Optional[str]
+    pnext: int = -1      # posición 0-based del mate (-1 si no aplica)
 
     @property
     def mapped(self) -> bool:
@@ -103,6 +104,7 @@ def iter_sam(path: Union[str, Path]) -> Iterator[SamRead]:
                     cigar=r.cigarstring,
                     seq=r.query_sequence or "",
                     qual=r.qual,
+                    pnext=r.next_reference_start if r.is_paired else -1,
                 )
         return
 
@@ -117,8 +119,12 @@ def iter_sam(path: Union[str, Path]) -> Iterator[SamRead]:
             flag = int(parts[1])
             rname = None if parts[2] == "*" else parts[2]
             pos = int(parts[3]) - 1
+            try:
+                pnext = int(parts[8]) - 1 if parts[8] not in ("0", "*") else -1
+            except (ValueError, IndexError):
+                pnext = -1
             yield SamRead(
                 qname=parts[0], flag=flag, rname=rname, pos=pos,
                 mapq=int(parts[4]), cigar=None if parts[5] == "*" else parts[5],
-                seq=parts[9], qual=parts[10],
+                seq=parts[9], qual=parts[10], pnext=pnext,
             )

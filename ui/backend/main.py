@@ -42,6 +42,7 @@ from ui.backend.routers import (
     dataset,
     device,
     downstream,
+    gatk,
     gblup,
     jobs,
     kmer,
@@ -149,6 +150,7 @@ app.include_router(variants.router)
 app.include_router(quantitative.router)
 app.include_router(gblup.router)
 app.include_router(pblup.router)
+app.include_router(gatk.router)
 app.include_router(upload.router)
 app.include_router(jobs.router)
 app.include_router(dataset.router)

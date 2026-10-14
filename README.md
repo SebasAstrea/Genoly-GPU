@@ -14,6 +14,9 @@ Genoly-GPU ofrece las herramientas de un pipeline de genómica estándar —I/O 
 - Control de calidad: contenido GC, composición de bases y distribución de calidad Phred, con trimming y filtrado de lecturas.
 - Conteo de k-mers y espectro k-mer acelerado por GPU (codificación base-4 entera en int64, exacta hasta k=31), con estimación de tamaño de genoma (Lander-Waterman).
 - Pileup y llamada de variantes (SNV y deleciones) sobre GPU mediante operaciones de dispersión.
+- **Llamada de variantes estilo GATK HaplotypeCaller**: regiones activas sobre GPU, reensamblaje local (grafo de de Bruijn), PairHMM con tres backends (kernel C nativo, PyTorch GPU o NumPy) y genotipado completo PL/GQ/AD/DP/QUAL con exportación VCF 4.2.
+- **BQSR (Base Quality Score Recalibration)**: covariables calidad × ciclo × hebra, tabla de recalibración y SAM con calidades corregidas al estilo GATK.
+- **Detección de duplicados (MarkDuplicates)**: claves 5' sin clips, puntuación por calidades, flags 0x400 y estadísticas por biblioteca.
 - Genética cuantitativa sobre GPU: modelos lineales mixtos (LMM) con estimación REML/ML, matriz de parentesco genómica (VanRaden o GCTA) y predicción de valores de cría (BLUP).
 - Predicción genómica GBLUP en un paso con varianzas conocidas o estimadas por REML, incluyendo fiabilidad y precisión por individuo (PEV).
 - Predicción por modelo animal PBLUP a partir del pedigrí (columnas sire/dam): matriz de parentesco A, endogamia F, REML o varianzas fijas, fiabilidades.
@@ -68,7 +71,7 @@ Genoly-GPU/
 │   │   └── reduction.py          # PCA, KMeans y t-SNE sobre tensores GPU
 │   ├── report/
 │   │   └── plots.py              # SVG de heatmap, volcano e informes Markdown
-│   └── quantitative/
+│   ├── quantitative/
 │       ├── lmm.py                # LinearMixedModel: fachada LMM (REML/ML + BLUP)
 │       ├── gblup.py              # GenomicBLUP con fiabilidad y precisión
 │       ├── gwas.py               # Asociación GWAS
@@ -78,6 +81,18 @@ Genoly-GPU/
 │       ├── crossval.py           # Validación cruzada
 │       ├── popgen.py             # MAF / HWE y estadísticas de poblaciones
 │       └── utils.py              # Validación de datos y Cholesky regularizada
+│   └── gatk/                     # Port de GATK 4.x (HaplotypeCaller, BQSR, MarkDuplicates)
+│       ├── reads.py              # GATKRead y parser SAM de texto (sin dependencias)
+│       ├── pairhmm.py            # PairHMM Gotoh: backends nativo C / torch / numpy
+│       ├── active_region.py      # Detección de regiones activas (pileup GPU)
+│       ├── assembly.py           # Reensamblaje local (grafo de de Bruijn)
+│       ├── likelihoods.py        # Likelihoods de haplotipo y genotipado PL/GQ/AD
+│       ├── genotyper.py          # HaplotypeCaller: orquestación de variantes
+│       ├── bqsr.py               # BaseRecalibrator: covariables y tabla JSON
+│       ├── markdups.py           # Detección y marcado de duplicados
+│       └── vcf.py                # Escritura VCF estilo GATK (GT:AD:DP:GQ:PL)
+├── csrc/
+│   └── pairhmm.c                 # Kernel C del PairHMM (extensión opcional, MSVC/gcc)
 ├── docker/                         # Despliegue en contenedor (API + frontend con CUDA)
 │   ├── Dockerfile                # Multi-stage: frontend Node + backend CPU/GPU condicional
 │   ├── docker-compose.yml        # Servicios genoly-cpu / genoly-gpu / gpu-select
@@ -89,6 +104,7 @@ Genoly-GPU/
 ├── docs/                           # arquitectura y documentación de producto
 ├── examples/
 │   ├── pipeline_completo.py      # Pipeline completo: I/O -> QC -> k-mers -> variantes
+│   ├── haplotype_caller_gatk.py  # HaplotypeCaller + BQSR + MarkDuplicates (GATK)
 │   ├── examp1.py                 # Ejemplo de uso del alineador
 │   ├── analisis1.py              # Análisis FASTA: composición y contenido GC
 │   ├── analisis2.py              # Sitios de restricción y motivos consenso
@@ -102,6 +118,7 @@ Genoly-GPU/
 │   ├── test_downstream.py        # PCA / KMeans / t-SNE y su job
 │   ├── test_annotation_report.py # GFF/GO, SVG de heatmap y volcano, jobs de anotación/informe
 │   ├── test_quantgen_extra.py    # Validación cruzada, GWAS, GRM, MAF/HWE, pedigrí (A/F), PBLUP
+│   ├── test_gatk_pipeline.py     # HaplotypeCaller (paridad C/torch/numpy), BQSR, MarkDuplicates, API
 │   ├── test_api.py               # API REST: auth, límites de subida, LFI, SSE, PBLUP
 │   ├── test_worker.py            # Aislamiento de procesos y limpieza de spills huérfanos
 │   └── conftest.py               # sys.path de la raíz (una sola vez)
@@ -116,7 +133,8 @@ Genoly-GPU/
 │   │   ├── registry.py           # Registro JSON con candado entre procesos
 │   │   ├── maintenance.py        # Límites de tamaño y caducidad (TTL) de archivos
 │   │   └── routers/              # device, qc, kmer, variants, map, downstream, annotation,
-│   │                             # report, quantitative, gblup, pblup, qdata, dataset, upload, jobs
+│   │                             # report, quantitative, gblup, pblup, qdata, dataset, upload,
+│   │                             # jobs, gatk (HaplotypeCaller/BQSR/MarkDuplicates)
 │   └── frontend/                 # UI React + Vite + Tailwind
 │       └── src/                  # páginas y componentes
 ├── fetchingfasta.py              # Descarga de FASTA desde NCBI por accession
@@ -149,12 +167,16 @@ Genoly-GPU incluye una interfaz web moderna construida con **React + Vite + Tail
 | `/quantitative` | Genética cuantitativa: LMM (REML/ML) y valores de cría BLUP (consume la matriz limpia de Datos). |
 | `/gblup` | Predicción genómica GBLUP con fiabilidad y precisión por individuo (consume la matriz limpia de Datos). |
 | `/pblup` | Predicción por modelo animal PBLUP con matriz A de pedigrí, endogamia F y fiabilidades (consume la matriz limpia de Datos). |
+| `/gatk` | Llamada de variantes estilo GATK HaplotypeCaller (ensamblaje local + PairHMM), MarkDuplicates y BQSR sobre SAM/FASTA, con VCF/SAM descargables. |
 
 Además, los análisis de larga duración sobre archivos subidos se ejecutan como **trabajos de fondo con progreso en tiempo real**:
 
 | Endpoint | Funcionalidad |
 |---|---|
 | `POST /api/kmer/count-async` | Encola el conteo de k-mers y devuelve un `job_id`. |
+| `POST /api/gatk/call-file` | Encola HaplotypeCaller (SAM + FASTA -> VCF con progreso SSE). |
+| `POST /api/gatk/bqsr` | Encola BQSR (tabla de recalibración JSON + SAM recalibrado). |
+| `POST /api/gatk/markdups` | Encola MarkDuplicates (SAM con flags 0x400 + estadísticas). |
 | `GET /api/jobs/{id}` | Estado y resultado del trabajo (JSON, para polling). |
 | `GET /api/jobs/{id}/events` | Progreso en tiempo real vía **Server-Sent Events** (registros/bases leídas, micro-lotes GPU). |
 
@@ -559,7 +581,7 @@ docker compose -f docker/docker-compose.yml ps
 
 # Healthcheck
 curl http://localhost:8000/api/health
-# {"status":"ok","version":"0.2.0"}
+# {"status":"ok","version":"0.3.0"}
 
 # Detección de GPU
 curl http://localhost:8000/api/device
@@ -708,6 +730,13 @@ pblup = PedigreeBLUP()
 r = pblup.fit_pedigree(fenotipos, X, individuos, padres, madres)
 h2 = r.genetic_variance / (r.genetic_variance + r.residual_variance)
 print(h2, pblup.inbreeding())
+
+# 9. Llamada de variantes estilo GATK HaplotypeCaller (ensamblaje + PairHMM)
+from Genoly import HaplotypeCaller
+caller = HaplotypeCaller()          # PairHMM: nativo C -> torch GPU -> numpy
+variantes = caller.call_from_sam("alineamientos.sam", "referencia.fasta")
+for v in variantes["by_sequence"]["chr1"][:5]:
+    print(v.position, v.ref, v.alt, v.gt, v.qual)
 ```
 
 ## Ejemplos
@@ -715,6 +744,9 @@ print(h2, pblup.inbreeding())
 ```bash
 # Pipeline completo: I/O -> QC -> k-mers -> variantes
 python examples/pipeline_completo.py
+
+# Llamada de variantes estilo GATK: HaplotypeCaller + MarkDuplicates + BQSR
+python examples/haplotype_caller_gatk.py
 
 # Ejemplo completo del alineador
 python examples/examp1.py
@@ -744,7 +776,7 @@ ruff check .
 
 `pytest`, `ruff` y `httpx` (necesario para los tests de la API) vienen en el extra de desarrollo: `pip install -e ".[dev]"`. El CI (`.github/workflows/ci.yml`) ejecuta `ruff check .` y `python -m pytest tests -q` en Python 3.10 y 3.12.
 
-Hay 161 tests (más 39 subtests) repartidos en 10 ficheros:
+Hay 220 tests repartidos en 11 ficheros:
 
 | Fichero | Qué cubre |
 |---|---|
@@ -756,6 +788,7 @@ Hay 161 tests (más 39 subtests) repartidos en 10 ficheros:
 | `test_downstream.py` | PCA / KMeans / t-SNE y su job |
 | `test_annotation_report.py` | GFF/GO, SVG de heatmap y volcano, jobs de anotación e informe |
 | `test_quantgen_extra.py` | validación cruzada, GWAS, GRM, MAF/HWE, pedigrí (matriz A, F, A⁻¹), PBLUP (varianzas dadas/REML, equivalencia con GBLUP) |
+| `test_gatk_pipeline.py` | PairHMM (paridad exacta native/torch/numpy), regiones activas, ensamblaje, genotipado SNV/indel, HaplotypeCaller end-to-end (SAM→VCF), BQSR, MarkDuplicates y sus endpoints `/api/gatk/*` |
 | `test_api.py` | auth `X-API-Key`/`Bearer`/`?api_key=` y `/api/health` pública, 401 en toda la superficie, límites de subida (413/409), registro de rutas (allowlist y LFI), stream SSE de jobs y smoke de `/api/pblup/predict` |
 | `test_worker.py` | aislamiento de procesos (raise / segfault / `os._exit`) y spills huérfanos |
 
@@ -857,6 +890,38 @@ Pileup y llamada de variantes acelerado por GPU.
 
 > [!IMPORTANT]
 > El caller asume lecturas ya alineadas a la referencia: cada `Read` indica su secuencia, la posición 0-based de inicio y la hebra (`+`/`-`). Las posiciones reportadas en las variantes son 1-based.
+
+### HaplotypeCaller (paquete `Genoly.gatk`)
+
+Llamada de variantes con reensamblaje local al estilo GATK 4.x: detección de regiones activas (pileup GPU), ensamblaje de haplotipos (grafo de de Bruijn), alineamiento read↔haplotipo con PairHMM (Gotoh affine, tres backends) y genotipado con PL/GQ/AD/DP/QUAL. Incluye además BQSR y MarkDuplicates.
+
+| Método / clase | Descripción |
+|---|---|
+| `HaplotypeCaller.call_region(reference, reads)` | Genotipa una región; devuelve `List[GATKVariant]` con POS 1-based. |
+| `HaplotypeCaller.call_from_sam(sam, ref, ...)` | Pipeline completo SAM/FASTA → dict con variantes por secuencia, contadores y muestra. |
+| `active_regions(reads, reference, ...)` | Ventanas con evidencia de variación (mismatches, huecos cortos). |
+| `BaseRecalibrator().estimate(ref, reads)` | Tabla BQSR (calidad × ciclo × hebra); `apply_recalibration` corrige las calidades. |
+| `mark_duplicates(reads)` / `apply_duplicate_flags(...)` | Detección por clave 5' y marcado con flag 0x400. |
+| `write_gatk_vcf(path, by_sequence, ...)` | VCF 4.2 con el esquema de HaplotypeCaller (`GT:AD:DP:GQ:PL`). |
+
+El PairHMM usa el kernel C nativo (`csrc/pairhmm.c`, compilado con `python setup.py build_ext --inplace`) si está disponible; si no, cae a PyTorch GPU y, en último extremo, a NumPy. Los tres backends son numéricamente equivalentes (verificado en `tests/test_gatk_pipeline.py`).
+
+```python
+from Genoly import HaplotypeCaller
+from Genoly.gatk import BaseRecalibrator, mark_duplicates, write_gatk_vcf
+
+caller = HaplotypeCaller(device="auto", backend="auto")
+result = caller.call_from_sam("alineamientos.sam", "referencia.fasta",
+                              sample_name="MUESTRA1")
+write_gatk_vcf("salida.vcf", result["by_sequence"],
+               result["sequences"], sample="MUESTRA1")
+
+stats = mark_duplicates(lecturas)
+tabla = BaseRecalibrator().estimate("referencia.fasta", lecturas)
+```
+
+> [!NOTE]
+> El parser SAM es texto puro (sin dependencia de pysam), así que funciona en cualquier plataforma. Para BAM, convierte antes con `samtools view -h`.
 
 ### GPUSequenceAligner
 
@@ -1017,6 +1082,10 @@ python descargar_datos_test.py
 - [x] Análisis de calidad (scores Phred), trimming y filtrado.
 - [x] Conteo de k-mers y espectro k-mer en GPU.
 - [x] Llamada de variantes (SNV/deleciones) en GPU.
+- [x] Llamada de variantes estilo GATK HaplotypeCaller: regiones activas, reensamblaje local, PairHMM (C/torch/numpy), genotipado PL/GQ/AD y VCF 4.2.
+- [x] BQSR: tabla de recalibración (calidad × ciclo × hebra) y SAM con calidades corregidas.
+- [x] Detección de duplicados (MarkDuplicates) con flags 0x400 y estadísticas por biblioteca.
+- [x] Página UI `/gatk` con HaplotypeCaller, MarkDuplicates y BQSR sobre archivos subidos (jobs + SSE).
 - [x] Genética cuantitativa: modelos lineales mixtos (REML/ML) y BLUP sobre GPU.
 - [x] Predicción genómica GBLUP con fiabilidad y precisión por individuo.
 - [x] Predicción PBLUP por modelo animal (matriz A de pedigrí, endogamia F, REML o varianzas fijas).
